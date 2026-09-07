@@ -538,3 +538,15 @@ def test_check_health_reports_an_unreachable_server_database(monkeypatch, capsys
     out = capsys.readouterr().out
     assert "[FAIL] database" in out
     assert "s3cretpw" not in out
+
+
+def test_the_cli_reports_a_bad_database_url_instead_of_crashing(monkeypatch, capsys):
+    from ui.backend import admin
+
+    monkeypatch.delenv("BESTTEAM_DB_PATH", raising=False)
+    for bad in ("://", "mysql+pymysql://u:p@h/d"):
+        monkeypatch.setenv("BESTTEAM_DATABASE_URL", bad)
+        assert admin.main(["check-env"]) == 1
+        assert "[FAIL] database" in capsys.readouterr().out
+        assert admin.main(["check-health"]) == 1
+        assert "[FAIL] database" in capsys.readouterr().out

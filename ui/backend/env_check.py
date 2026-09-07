@@ -356,7 +356,7 @@ def check_schema(
 
     try:
         stamped = _stamped_revision(url)
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ImportError) as exc:
         # A SQLite file that cannot be read is a warning; a server that cannot
         # be reached is what the backend itself will die on -- FAIL.
         level = "WARN" if sqlite_path_of(url) is not None else "FAIL"
@@ -423,7 +423,7 @@ def check_org_retention(target: Union[str, Path, None] = None) -> Finding:
                 ))]
         finally:
             engine.dispose()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ImportError) as exc:
         return Finding("WARN", _ORG_RETENTION, f"could not read org retention from "
                        f"{describe_database_url(url)}: {str(exc).splitlines()[0]}")
 
@@ -475,7 +475,7 @@ def check_model_catalog(target: Union[str, Path, None] = None) -> Finding:
                 rows = list(conn.execute(text("SELECT spec, tier FROM model_catalog")))
         finally:
             engine.dispose()
-    except SQLAlchemyError as exc:
+    except (SQLAlchemyError, ImportError) as exc:
         return Finding("WARN", _MODEL_CATALOG, f"could not read the model catalog from "
                        f"{describe_database_url(url)}: {str(exc).splitlines()[0]}")
 

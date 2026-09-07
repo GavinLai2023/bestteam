@@ -63,6 +63,8 @@ from .db.users import (
     set_user_org,
 )
 from .env_check import (
+    Finding,
+    check_database_url,
     check_environment,
     check_model_catalog,
     check_org_retention,
@@ -202,19 +204,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Deliberately before the database is opened (`_open_session` is what
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
-        url = default_database_url(os.environ)
-        findings = check_environment(os.environ) + [
-            check_schema(url),
-            check_org_retention(url),
-            check_model_catalog(url),
-        ]
+        findings = check_environment(os.environ)
+        database = next(finding for finding in findings if finding.name == "database")
+        # A URL that cannot be parsed, an unsupported dialect or a missing
+        # driver is already a FAIL line; reading through it would only add a
+        # traceback on top of it.
+        if database.level != "FAIL":
+            url = default_database_url(os.environ)
+            findings += [
+                check_schema(url),
+                check_org_retention(url),
+                check_model_catalog(url),
+            ]
         return _print_findings(findings)
 
     if args.command == "check-health":
-        from sqlalchemy.exc import OperationalError
+        from sqlalchemy.exc import SQLAlchemyError
 
         from .db.database import describe_database_url, sqlite_path_of
 
+        # The URL itself first: garbage, an unsupported dialect or a missing
+        # driver is reported the way `check-env` reports it -- a FAIL line
+        # and exit 1, never a traceback out of cron.
+        database = check_database_url(os.environ)
+        if database.level == "FAIL":
+            return _print_findings([database])
         # Guard before `_open_session`: on a box with no SQLite file yet,
         # opening the session would CREATE it, and a health check must not.
         url = default_database_url(os.environ)
@@ -228,12 +242,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             with _open_session() as db:
                 metrics = collect(db)
-        except OperationalError as exc:
-            # A server database that cannot be reached -- the right signal
-            # from a cron job is a FAIL line, not a traceback.
-            print(f"[FAIL] database: cannot reach {describe_database_url(url)} "
-                  f"({str(exc).splitlines()[0]})")
-            return 1
+        except SQLAlchemyError as exc:
+            # A server that cannot be reached, or a database that cannot be
+            # read -- the right signal from a cron job is a FAIL line.
+            return _print_findings([Finding(
+                "FAIL", "database",
+                f"cannot read {describe_database_url(url)} ({str(exc).splitlines()[0]})",
+            )])
         findings = evaluate(
             metrics,
             poll_interval_seconds=poll_seconds(),
