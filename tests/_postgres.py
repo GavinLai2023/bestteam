@@ -96,7 +96,12 @@ def clone_engine() -> Engine:
     """A fresh database with the schema and no rows, dropped after the test."""
     name = f"t_{uuid.uuid4().hex[:12]}"
     _create(name, template=ensure_template())
-    engine = create_engine(url_for(name), pool_pre_ping=True)
+    # Through the app's own factory, not create_engine: the lane is here to
+    # exercise what a deployment runs, including its connection settings (the
+    # session timezone above all -- see `make_engine`).
+    from ui.backend.db import make_engine
+
+    engine = make_engine(url_for(name).render_as_string(hide_password=False))
     _created.append((engine, name))
     return engine
 

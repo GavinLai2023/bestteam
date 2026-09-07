@@ -159,7 +159,20 @@ def make_engine(target: Union[str, Path] = "bestteam.db", *, echo: bool = False)
         )
 
     try:
-        return create_engine(url, echo=echo, pool_pre_ping=True)
+        return create_engine(
+            url,
+            echo=echo,
+            pool_pre_ping=True,
+            # Every timestamp column is naive and holds UTC (`models._utcnow`
+            # writes an aware UTC value, `models.iso_utc` stamps it back on
+            # read). SQLite simply drops the offset. Postgres converts an
+            # aware value into the *session's* zone before storing it in a
+            # `timestamp without time zone`, so on a server whose zone is not
+            # UTC every write would land hours out -- and `CURRENT_TIMESTAMP`
+            # would too. Pin the session to UTC. It is a startup option, not a
+            # `SET`, so no rolled-back transaction can undo it.
+            connect_args={"options": "-c timezone=UTC"},
+        )
     except (ModuleNotFoundError, NoSuchModuleError) as exc:
         raise RuntimeError(
             f"BESTTEAM_DATABASE_URL names the {backend!r} engine but its driver is not "
