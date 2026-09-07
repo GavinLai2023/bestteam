@@ -215,6 +215,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "migrate-db":
+        from sqlalchemy.exc import SQLAlchemyError
+
         from .db.migrate import MigrateError, run_migration
 
         try:
@@ -225,7 +227,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 batch_size=args.batch_size,
                 log=print,
             )
-        except MigrateError as exc:
+        except (MigrateError, ValueError, RuntimeError, SQLAlchemyError) as exc:
+            # A refusal, an unsupported dialect or missing driver from make_engine,
+            # a URL make_url cannot parse, or an unreachable server: a FAIL line
+            # and exit 1, never a traceback (the check-env / check-health rule).
             print(f"[FAIL] migrate-db: {exc}")
             return 1
 

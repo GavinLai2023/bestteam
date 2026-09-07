@@ -282,3 +282,18 @@ def test_cli_exit_codes_and_messages(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "verified" in out
     assert "NOT copied" in out
+
+
+def test_cli_reports_a_bad_target_url_as_a_fail_line(tmp_path, monkeypatch, capsys):
+    from ui.backend import admin
+
+    src_path = tmp_path / "src.db"
+    _seed_source(src_path)
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(src_path))
+    monkeypatch.delenv("BESTTEAM_DATABASE_URL", raising=False)
+
+    # An unsupported dialect (make_engine refuses it by name) and a URL that
+    # cannot be parsed at all: both end in a FAIL line, not a traceback.
+    for bad in ("mysql://user@host/db", "://"):
+        assert admin.main(["migrate-db", "--to", bad, "--fix-orphans"]) == 1
+        assert "[FAIL] migrate-db" in capsys.readouterr().out
