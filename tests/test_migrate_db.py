@@ -264,3 +264,21 @@ def test_clear_migration_seed_survives_a_seeded_head_pointer_cycle(tmp_path):
                 assert db.execute(sa.select(sa.func.count()).select_from(table)).scalar_one() == 0, table.name
     finally:
         engine.dispose()
+
+
+def test_cli_exit_codes_and_messages(tmp_path, monkeypatch, capsys):
+    from ui.backend import admin
+
+    src_path = tmp_path / "src.db"
+    _seed_source(src_path)
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(src_path))
+    monkeypatch.delenv("BESTTEAM_DATABASE_URL", raising=False)
+    target = sqlite_url_for(tmp_path / "dst.db")
+
+    assert admin.main(["migrate-db", "--to", target]) == 1
+    assert "[FAIL] migrate-db" in capsys.readouterr().out
+
+    assert admin.main(["migrate-db", "--to", target, "--fix-orphans"]) == 0
+    out = capsys.readouterr().out
+    assert "verified" in out
+    assert "NOT copied" in out
