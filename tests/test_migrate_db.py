@@ -297,3 +297,39 @@ def test_cli_reports_a_bad_target_url_as_a_fail_line(tmp_path, monkeypatch, caps
     for bad in ("mysql://user@host/db", "://"):
         assert admin.main(["migrate-db", "--to", bad, "--fix-orphans"]) == 1
         assert "[FAIL] migrate-db" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not _postgres.enabled(), reason="BESTTEAM_TEST_DATABASE_URL is not set")
+def test_copies_into_postgres_and_resets_the_sequences(tmp_path):
+    # Also proves the pipelines <-> pipeline_versions head-pointer patch under
+    # a target that actually enforces foreign keys (Task 19's review noted the
+    # fix was proven only on a SQLite target): publish a version on the
+    # source exactly like test_copies_the_head_pointers_across_the_version_cycle.
+    src = _seed_source(tmp_path / "src.db")
+    engine = make_engine(src)
+    try:
+        with session_factory(engine)() as db:
+            org_id = db.query(Organization).one().id
+            record, version = publish_pipeline_version(
+                db, org_id=org_id, name="team", config={"agents": [{"name": "a"}]}
+            )
+            db.commit()
+            expected = (record.id, version.id)
+    finally:
+        engine.dispose()
+    target = _postgres.empty_database_url().render_as_string(hide_password=False)
+
+    assert run_migration(src, target, fix_orphans=True, log=lambda _line: None) == 0
+
+    engine = make_engine(target)
+    try:
+        with session_factory(engine)() as db:
+            assert db.query(Run).count() == 2
+            assert db.get(Run, "run-2").retry_of_run_id == "run-1"
+            assert db.get(PipelineRecord, expected[0]).current_version_id == expected[1]
+            assert db.get(PipelineVersion, expected[1]).pipeline_id == expected[0]
+            db.add(Organization(name="next"))
+            db.commit()  # would collide on id=1 without the sequence reset
+            assert db.query(Organization).count() == 2
+    finally:
+        engine.dispose()
