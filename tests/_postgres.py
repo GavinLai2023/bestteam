@@ -24,6 +24,7 @@ from sqlalchemy.pool import NullPool
 MAINTENANCE_URL = os.environ.get("BESTTEAM_TEST_DATABASE_URL", "").strip()
 
 _template: Optional[str] = None
+_template_error: Optional[BaseException] = None
 # (engine, database name) created since the last drop_created(); conftest
 # drains it after every test.
 _created: List[Tuple[Engine, str]] = []
@@ -64,7 +65,11 @@ def _drop(name: str) -> None:
 
 def ensure_template() -> str:
     """The session's template database: the current `create_all` schema, no rows."""
-    global _template
+    global _template, _template_error
+    if _template_error is not None:
+        # The schema did not build once; every later test fails fast on the
+        # same error instead of creating and dropping a database each.
+        raise _template_error
     if _template is None:
         name = f"bestteam_tmpl_{uuid.uuid4().hex[:8]}"
         _create(name)
@@ -73,6 +78,13 @@ def ensure_template() -> str:
             from ui.backend.db import init_db
 
             init_db(engine)
+        except Exception as exc:
+            # A schema that does not build on Postgres must not leak one
+            # template per test: drop it and remember why.
+            engine.dispose()
+            _drop(name)
+            _template_error = exc
+            raise
         finally:
             # CREATE DATABASE ... TEMPLATE refuses while anyone is connected.
             engine.dispose()
