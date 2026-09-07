@@ -318,10 +318,17 @@ docker compose run --rm --no-deps backend alembic upgrade head
 docker compose up -d
 ```
 
+### Moving to a server database
+
 Moving to a server database is not a migration but a copy: `admin migrate-db
---to <url>` (see the ADMIN_GUIDE). The procedure around it — provisioning,
-backups, the cutover window — is the ops half of the 2026-09-07 spec and is
-not written yet.
+--to <url>` (see the ADMIN_GUIDE). **Stop the application first** — the copy is
+a point-in-time snapshot of the source, and a source still being written to
+fails verification rather than copying silently. Provision the target as an
+empty database and let `migrate-db` run the migration chain on it; do **not**
+start the stack against it first, or the rows the chain seeds make it non-empty
+and the copy refuses (recover by dropping and recreating it). The procedure
+around all this — provisioning, backups, the cutover window — is the ops half
+of the 2026-09-07 spec and is not written yet.
 
 On Postgres the migration chain must run on the EMPTY database before the
 backend ever starts against it: the rename migration `o2p3q4r5s6t7` cannot

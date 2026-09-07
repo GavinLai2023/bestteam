@@ -145,9 +145,30 @@ def test_refuses_orphans_without_the_flag_and_writes_no_rows(tmp_path):
             engine.dispose()
 
 
+def _source_values(url) -> dict:
+    """What the copy has to reproduce byte for byte, read before it runs.
+
+    `verify_copy` compares row counts and primary keys only, so a column value
+    mangled by a type round trip would pass every other assertion in this file.
+    """
+    engine = make_engine(url)
+    try:
+        with session_factory(engine)() as db:
+            return {
+                "created_at": db.get(Organization, 1).created_at,
+                # SQL NULL in a JSON column: `sa.JSON` maps both it and a stored
+                # JSON `null` to None on the way out, so a copy that writes None
+                # back turns every one of these into the document `null`.
+                "sql_null_trigger_contexts": db.query(Run).filter(Run.trigger_context.is_(None)).count(),
+            }
+    finally:
+        engine.dispose()
+
+
 def test_copies_everything_with_orphans_fixed_and_the_source_untouched(tmp_path):
     src_path = tmp_path / "src.db"
     src = _seed_source(src_path)
+    source = _source_values(src)
     before = src_path.read_bytes()
     target = sqlite_url_for(tmp_path / "dst.db")
     lines = []
@@ -165,6 +186,11 @@ def test_copies_everything_with_orphans_fixed_and_the_source_untouched(tmp_path)
             assert db.get(Run, "run-2").retry_of_run_id == "run-1"
             assert db.query(UsageRecord).filter_by(run_id=None).count() == 1
             assert db.get(Organization, 1).name == "acme"  # primary keys preserved
+            assert db.query(PipelineRecord).one().config == {"agents": [{"name": "a"}]}
+            assert db.get(Organization, 1).created_at == source["created_at"]
+            assert db.query(PipelineRecord).one().active is True   # a bool, not 1
+            assert (db.query(Run).filter(Run.trigger_context.is_(None)).count()
+                    == source["sql_null_trigger_contexts"] == 2)
     finally:
         engine.dispose()
     assert any("verified" in line for line in lines)
@@ -196,6 +222,20 @@ def test_refuses_an_in_memory_database_on_either_side(tmp_path):
         run_migration("sqlite:///:memory:", sqlite_url_for(tmp_path / "dst.db"), log=lambda _line: None)
     with pytest.raises(MigrateError, match="in-memory"):
         run_migration(src, "sqlite:///:memory:", log=lambda _line: None)
+    assert not (tmp_path / "dst.db").exists()
+
+
+def test_refuses_an_absent_source_file_and_a_batch_size_below_one(tmp_path):
+    # Both are refused before either engine is built. `readonly_engine` opens a
+    # SQLite source `mode=ro`, which cannot create the file, so without the
+    # check an absent one surfaces as a two-line driver error naming neither
+    # side of the copy.
+    src = _seed_source(tmp_path / "src.db")
+    target = sqlite_url_for(tmp_path / "dst.db")
+    with pytest.raises(MigrateError, match="does not exist"):
+        run_migration(sqlite_url_for(tmp_path / "gone.db"), target, log=lambda _line: None)
+    with pytest.raises(MigrateError, match="batch-size"):
+        run_migration(src, target, fix_orphans=True, batch_size=0, log=lambda _line: None)
     assert not (tmp_path / "dst.db").exists()
 
 
@@ -317,6 +357,7 @@ def test_copies_into_postgres_and_resets_the_sequences(tmp_path):
             expected = (record.id, version.id)
     finally:
         engine.dispose()
+    source = _source_values(src)
     target = _postgres.empty_database_url().render_as_string(hide_password=False)
 
     assert run_migration(src, target, fix_orphans=True, log=lambda _line: None) == 0
@@ -328,6 +369,12 @@ def test_copies_into_postgres_and_resets_the_sequences(tmp_path):
             assert db.get(Run, "run-2").retry_of_run_id == "run-1"
             assert db.get(PipelineRecord, expected[0]).current_version_id == expected[1]
             assert db.get(PipelineVersion, expected[1]).pipeline_id == expected[0]
+            # The values, across the dialect boundary the copy exists for.
+            assert db.get(PipelineRecord, expected[0]).config == {"agents": [{"name": "a"}]}
+            assert db.get(Organization, 1).created_at == source["created_at"]
+            assert db.get(PipelineRecord, expected[0]).active is True   # a bool, not 1
+            assert (db.query(Run).filter(Run.trigger_context.is_(None)).count()
+                    == source["sql_null_trigger_contexts"] == 2)
             db.add(Organization(name="next"))
             db.commit()  # would collide on id=1 without the sequence reset
             assert db.query(Organization).count() == 2

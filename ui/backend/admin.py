@@ -210,11 +210,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     migrate_p.add_argument("--fix-orphans", action="store_true",
                            help="write a nullable dangling foreign key as NULL and skip a row "
                                 "whose NOT NULL one dangles (both reported); refused otherwise")
-    migrate_p.add_argument("--batch-size", type=int, default=1000)
+    migrate_p.add_argument("--batch-size", type=int, default=1000,
+                           help="rows per INSERT statement (default 1000)")
 
     args = parser.parse_args(argv)
 
     if args.command == "migrate-db":
+        from alembic.util import CommandError
         from sqlalchemy.exc import SQLAlchemyError
 
         from .db.migrate import MigrateError, run_migration
@@ -227,10 +229,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 batch_size=args.batch_size,
                 log=print,
             )
-        except (MigrateError, ValueError, RuntimeError, SQLAlchemyError) as exc:
+        except (MigrateError, ValueError, RuntimeError, SQLAlchemyError, CommandError) as exc:
             # A refusal, an unsupported dialect or missing driver from make_engine,
-            # a URL make_url cannot parse, or an unreachable server: a FAIL line
-            # and exit 1, never a traceback (the check-env / check-health rule).
+            # a URL make_url cannot parse, an unreachable server, or Alembic's own
+            # complaint (a script directory with multiple heads, a target stamped at
+            # a revision this checkout does not know -- `CommandError` derives from
+            # Exception, not RuntimeError): a FAIL line and exit 1, never a
+            # traceback (the check-env / check-health rule).
             print(f"[FAIL] migrate-db: {exc}")
             return 1
 

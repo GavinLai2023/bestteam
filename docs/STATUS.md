@@ -11,7 +11,7 @@
   `specs/2026-09-07-database-engine-portability-design.md`). Pre-flight
   refuses a source behind head, a non-empty target, the same URL, and
   dangling foreign keys unless `--fix-orphans` (nullable → NULL, NOT NULL →
-  row skipped, both reported with keys, and a skipped row's primary key is
+  row skipped, both counted per table, and a skipped row's primary key is
   listed); the target's schema comes from `alembic upgrade head`; the rows
   the chain seeds are cleared, then rows go through the model tables' types
   in a dependency order that breaks the two head-pointer cycles at their

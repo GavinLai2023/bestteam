@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy import Engine, Table, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import CircularDependencyError
-from sqlalchemy.sql.ddl import sort_tables_and_constraints
+from sqlalchemy.schema import sort_tables_and_constraints
 
 from .database import describe_database_url, make_engine, readonly_engine, sqlite_path_of
 from .models import Base
@@ -117,7 +117,11 @@ def preflight(source: Engine, target: Engine, *, source_url: str, target_url: st
     with target.connect() as conn:
         for table in Base.metadata.tables.values():
             if table.name in existing and conn.execute(select(sa.func.count()).select_from(table)).scalar_one():
-                raise MigrateError(f"the target already holds rows in {table.name}; migrate-db fills an EMPTY database only")
+                raise MigrateError(
+                    f"the target already holds rows in {table.name}; migrate-db fills an EMPTY "
+                    "database only; drop and recreate the target (migrate-db runs the migration "
+                    "chain itself)"
+                )
     orphans = orphan_report(source)
     if orphans and not fix_orphans:
         detail = ", ".join(f"{o.table}.{o.column} -> {o.parent}: {o.rows}" for o in orphans)
@@ -216,6 +220,18 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
     the two `current_version_id` head pointers -- is written as NULL first and
     patched after every table is in, so row order never matters. Orphan
     policy (Ruling 8) applies to the copy stream only.
+
+    One asymmetry has to be undone by hand: `sa.JSON` is declared with the
+    default `none_as_null=False`, so its result processor maps BOTH a SQL
+    NULL and a stored JSON `null` to Python `None`, and its bind processor
+    then serialises `None` back as the JSON document `null`. Left alone, every
+    SQL NULL in a JSON column would arrive as JSON `null` -- a difference
+    `verify_copy` cannot see, and one that makes a later
+    `WHERE trigger_context IS NULL` return nothing. Substituting `sa.null()`
+    (`json_columns` below) makes SQL NULL round-trip exactly, at the cost of
+    collapsing a stored JSON `null` to SQL NULL. That is the right trade: the
+    JSON-`null`/`None` distinction is unreachable from every read path in this
+    codebase, whereas SQL-level NULLness is directly observable (`IS NULL`).
     """
     report = CopyReport()
     order = _copy_order()
@@ -226,6 +242,7 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
         for table in order:
             stats = TableCopy()
             pk_columns = list(table.primary_key.columns)
+            json_columns = [c.name for c in table.columns if isinstance(c.type, sa.JSON)]
             forward = set(_forward_pointing_fks(table, position))
             keys: set = set()
             batch: List[dict] = []
@@ -267,6 +284,11 @@ def copy_rows(source: Engine, target: Engine, *, fix_orphans: bool, batch_size: 
                     continue
                 patches.extend(row_patches)
                 keys.add(_pk_of(table, record))
+                for name in json_columns:
+                    # A SQL NULL read back as None; `sa.null()` writes it as one
+                    # again instead of the JSON document `null` (see the docstring).
+                    if record[name] is None:
+                        record[name] = sa.null()
                 batch.append(record)
                 if len(batch) >= batch_size:
                     dst.execute(table.insert(), batch)
@@ -348,14 +370,23 @@ def verify_copy(source: Engine, target: Engine, report: CopyReport) -> List[str]
 
 def run_migration(source_url: str, target_url: str, *, fix_orphans: bool = False,
                   batch_size: int = 1000, log: Callable[[str], None] = print) -> int:
+    if batch_size < 1:
+        raise MigrateError(f"--batch-size must be at least 1, not {batch_size}")
     for label, url in (("source", source_url), ("target", target_url)):
         if make_url(url).get_backend_name() == "sqlite" and sqlite_path_of(url) is None:
             raise MigrateError(f"the {label} must be a file or a server database, not an in-memory SQLite")
+    # A SQLite source is opened `mode=ro`, which cannot create the file, so an
+    # absent one would surface as a two-line driver error naming neither side
+    # (`env_check._absent_file` answers the same question for the checklist).
+    source_path = sqlite_path_of(source_url)
+    if source_path is not None and not source_path.exists():
+        raise MigrateError(f"the source file {source_path} does not exist")
     log(f"source: {describe_database_url(source_url)}")
     log(f"target: {describe_database_url(target_url)}")
     source = readonly_engine(source_url)
-    target = make_engine(target_url)
+    target = None
     try:
+        target = make_engine(target_url)
         orphans = preflight(source, target, source_url=source_url, target_url=target_url, fix_orphans=fix_orphans)
         for orphan in orphans:
             action = "written as NULL" if orphan.nullable else "skipped"
@@ -370,7 +401,7 @@ def run_migration(source_url: str, target_url: str, *, fix_orphans: bool = False
         for problem in problems:
             log(f"[FAIL] {problem}")
         if problems:
-            log("the target is partially populated; drop it and rerun")
+            log("the target is partially populated; drop it and rerun (is the source still being written to?)")
             return 1
         log("verified: every table's row count and primary keys match the source")
         log("NOT copied: the per-user memory store (BESTTEAM_MEMORY_DB) and the files under "
@@ -379,4 +410,5 @@ def run_migration(source_url: str, target_url: str, *, fix_orphans: bool = False
         return 0
     finally:
         source.dispose()
-        target.dispose()
+        if target is not None:
+            target.dispose()
