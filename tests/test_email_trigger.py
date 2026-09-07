@@ -528,6 +528,7 @@ def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit
     assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     # If the customer disconnects/replaces the mailbox WHILE this cycle's
     # pipeline is being built, org_settings.py/admin.py disable the trigger
@@ -561,6 +562,7 @@ def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     assert all(e.status == "pending" and e.attempts == 0 for e in db.query(InboxEvent))
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkeypatch):
     # The mid-build test above disables BEFORE the poller's enabled-check. This
     # covers the narrower window the check-then-commit split left open: a disable
@@ -1562,6 +1564,7 @@ def test_poll_org_blocks_on_the_per_org_dispatch_lock(db, monkeypatch):
     assert len(recorder.calls) == 1
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_retry_discards_if_the_trigger_is_disabled_before_the_atomic_advance(db, monkeypatch):
     """Unlike _start_triggered_run, retry_triggered_run's dispatch update
     previously had no enabled/active guard at all -- a customer

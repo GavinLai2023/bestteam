@@ -51,17 +51,25 @@ def make_test_engine(tmp_path: Optional[Path] = None):
     `tmp_path` for pipelines, sessions and uploads; fsync is off because the
     database dies with `tmp_path`.
 
-    Both SQLite shapes enforce foreign keys (`PRAGMA foreign_keys=ON`) -- the
-    production file does not, Postgres always does, and the suite is where a
-    child-before-parent write should be caught (spec 2026-09-07 §5).
+    Neither SQLite shape enforces foreign keys, and that is the Ruling 7
+    fallback being taken, not an oversight: `PRAGMA foreign_keys=ON` was tried
+    here and broke 194 tests across 18 files, of which about 150 were pure
+    fixture plumbing -- fixtures stamping a hardcoded `org_id=1`, a
+    `pipeline_version_id` of 42 or a made-up run id without ever inserting the
+    parent row. The spec agreed that trade in advance (2026-09-07 §5): when
+    the breakage is mostly fixtures rather than product defects and exceeds
+    what one session can clean up, the pragma is dropped and the Postgres
+    lane, where keys are always enforced, is the only enforcer. Production's
+    SQLite file keeps enforcement off either way.
 
     With `BESTTEAM_TEST_DATABASE_URL` set (the `backend-postgres` CI lane, or
     a local server), either shape returns a fresh Postgres database cloned
     from a per-session template; `tests/conftest.py` drops it when the test
-    ends. A test that depends on the `:memory:` shared-connection behaviour
-    on purpose (`test_email_trigger.py` commits through a second Session
-    while the first holds an uncommitted write) is marked `sqlite_only` and
-    skipped there.
+    ends. The three tests that depend on the `:memory:` shared-connection
+    behaviour on purpose (`test_email_trigger.py` commits through a second
+    Session while the first holds an uncommitted write -- on a real second
+    connection that write would block on a row lock) are marked `sqlite_only`
+    and skipped there.
     """
     if _postgres.enabled():
         return _postgres.clone_engine()
@@ -77,10 +85,6 @@ def make_test_engine(tmp_path: Optional[Path] = None):
             # Pay for the isolation above, not for durability: `synchronous`
             # governs only when writes reach the platter.
             dbapi_connection.execute("PRAGMA synchronous=OFF")
-
-    @event.listens_for(engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     return engine
 
