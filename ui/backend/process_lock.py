@@ -9,9 +9,11 @@ second container/replica -- would therefore run two pollers, create duplicate
 drafts, and release claims the first process still owns.
 
 `acquire_single_instance_lock` turns that misconfiguration into a refusal at
-startup: it takes a non-blocking exclusive OS lock on `<db>.lock` next to the
-database file and holds it for the process lifetime (the OS releases it on
-any exit, clean or killed, so a crashed process never wedges the next start).
+startup: it takes a non-blocking exclusive OS lock on `<anchor>.lock` -- beside
+the SQLite file, or `data/bestteam.lock` when the engine is a server database
+(`db_session.LOCK_ANCHOR`) and holds it for the process lifetime (the OS
+releases it on any exit, clean or killed, so a crashed process never wedges
+the next start).
 `main._lifespan` acquires it before the startup sweeps. `":memory:"` needs no
 lock -- an in-memory database is per-process by construction (tests).
 """
@@ -51,10 +53,10 @@ class _InstanceLock:
             os.close(fd)
 
 
-def acquire_single_instance_lock(db_path: Union[str, Path]) -> Optional[_InstanceLock]:
-    if str(db_path) == ":memory:":
+def acquire_single_instance_lock(anchor: Union[str, Path]) -> Optional[_InstanceLock]:
+    if str(anchor) == ":memory:":
         return None
-    lock_path = Path(f"{db_path}.lock")
+    lock_path = Path(f"{anchor}.lock")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         if os.name == "nt":
