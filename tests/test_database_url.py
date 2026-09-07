@@ -106,3 +106,10 @@ def test_make_engine_names_the_ui_extra_when_the_driver_is_missing(monkeypatch):
     monkeypatch.setattr(database, "create_engine", _no_driver)
     with pytest.raises(RuntimeError, match=r"BESTTEAM_DATABASE_URL.*bestteam\[ui\]"):
         make_engine("postgresql+psycopg://user:pw@host/db")
+
+
+def test_the_postgres_driver_ships_with_the_ui_extra():
+    """`psycopg[binary]` is in the `ui` extra so the same image serves either engine (Ruling 5)."""
+    from sqlalchemy.engine import make_url
+
+    make_url("postgresql+psycopg://u:p@h/d").get_dialect().import_dbapi()
