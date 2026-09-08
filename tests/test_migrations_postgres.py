@@ -1,6 +1,7 @@
 """The Alembic chain replays on Postgres and lands on the same schema as
 `create_all` (spec §8, Ruling 6). Runs only on the Postgres lane."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -51,12 +52,16 @@ def _foreign_keys(engine):
     }
 
 
-def test_upgrade_head_on_postgres_matches_create_all():
-    migrated = _postgres.empty_database_url()
+def _upgrade_head(url) -> None:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", migrated.render_as_string(hide_password=False).replace("%", "%%"))
-    command.upgrade(cfg, "head")  # must not raise: 42 migrations on a dialect they never ran on
+    cfg.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
+    command.upgrade(cfg, "head")
+
+
+def test_upgrade_head_on_postgres_matches_create_all():
+    migrated = _postgres.empty_database_url()
+    _upgrade_head(migrated)  # must not raise: 42 migrations on a dialect they never ran on
 
     fresh = _postgres.empty_database_url()
     fresh_engine = sa.create_engine(fresh)
@@ -68,3 +73,25 @@ def test_upgrade_head_on_postgres_matches_create_all():
     finally:
         fresh_engine.dispose()
         migrated_engine.dispose()
+
+
+def test_upgrade_head_stores_utc_whatever_the_server_zone_is():
+    """The chain's one timestamp write -- b7c8d9e0f1a2 seeds the default
+    organisation with CURRENT_TIMESTAMP into a naive column -- must land as
+    UTC, which on Postgres means the migration session's zone must be UTC:
+    Alembic's engine comes from `make_engine`, which pins it. The database's
+    own default is moved off UTC first, because CI's container never is."""
+    url = _postgres.empty_database_url()
+    _postgres.set_default_timezone(url.database, "Asia/Tokyo")  # +09:00 all year
+    _upgrade_head(url)
+
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            seeded = conn.execute(
+                sa.text("SELECT created_at FROM organizations WHERE name = 'default'")
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert abs(now - seeded) < timedelta(minutes=5), f"seeded {seeded}, UTC now {now}"

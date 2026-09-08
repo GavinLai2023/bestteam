@@ -17,6 +17,7 @@ deliberately here by the platform operator. Run inside the deployment, e.g.:
     docker compose exec backend python -m ui.backend.admin set-email acme --auth microsoft-oauth --user support@acme.com --tenant <directory-id> --client-id <application-id>
     docker compose exec backend python -m ui.backend.admin clear-email acme
     docker compose run --rm --no-deps backend python -m ui.backend.admin check-env
+    docker compose run --rm --no-deps backend python -m ui.backend.admin migrate-db --to postgresql+psycopg://user:pw@host/bestteam --fix-orphans
 
 `create-user --platform` creates a platform operator (no org); org members
 are created with `--org <name>` (default: the `default` org). Admin rights
@@ -198,7 +199,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "poller can't report itself through in-app notifications.",
     )
 
+    migrate_p = sub.add_parser(
+        "migrate-db",
+        help="copy this deployment's database into an EMPTY database at --to "
+             "(e.g. postgresql+psycopg://user:pw@host/bestteam): pre-flight checks, "
+             "orphan policy, sequence reset and verification. Never writes to the source.",
+    )
+    migrate_p.add_argument("--to", dest="target_url", required=True,
+                           help="SQLAlchemy URL of the empty target database")
+    migrate_p.add_argument("--fix-orphans", action="store_true",
+                           help="write a nullable dangling foreign key as NULL and skip a row "
+                                "whose NOT NULL one dangles (both reported); refused otherwise")
+    migrate_p.add_argument("--batch-size", type=int, default=1000,
+                           help="rows per INSERT statement (default 1000)")
+
     args = parser.parse_args(argv)
+
+    if args.command == "migrate-db":
+        from alembic.util import CommandError
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from .db.migrate import MigrateError, run_migration
+
+        try:
+            return run_migration(
+                default_database_url(os.environ),
+                args.target_url,
+                fix_orphans=args.fix_orphans,
+                batch_size=args.batch_size,
+                log=print,
+            )
+        except (MigrateError, ValueError, RuntimeError, SQLAlchemyError, CommandError) as exc:
+            # A refusal, an unsupported dialect or missing driver from make_engine,
+            # a URL make_url cannot parse, an unreachable server, or Alembic's own
+            # complaint (a script directory with multiple heads, a target stamped at
+            # a revision this checkout does not know -- `CommandError` derives from
+            # Exception, not RuntimeError): a FAIL line and exit 1, never a
+            # traceback (the check-env / check-health rule).
+            print(f"[FAIL] migrate-db: {exc}")
+            return 1
 
     if args.command == "check-env":
         # Deliberately before the database is opened (`_open_session` is what

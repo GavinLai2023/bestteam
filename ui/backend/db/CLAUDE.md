@@ -37,6 +37,10 @@ CI-verified, not yet operated — `docs/DECISIONS.md`.
   index carries both `sqlite_where` and `postgresql_where`; boolean server
   defaults are `true()`/`false()`, never `text("1")` (Postgres rejects an
   integer default on a boolean).
+- `db/migrate.py` (`admin migrate-db --to <url>`) copies this deployment into
+  an **empty** target: pre-flight refuses a source behind head, a non-empty
+  target, or dangling foreign keys unless `--fix-orphans`; the source is
+  never written.
 
 ## Org multi-tenancy
 

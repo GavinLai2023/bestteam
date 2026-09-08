@@ -351,7 +351,15 @@ requirement: local development needs no Postgres.
    on the model tables, so JSON, boolean and datetime values go through the
    column types on both sides. Rows are read in primary-key order, except
    `runs`, read by `created_at, id` so a retry or diagnostic run follows the
-   run it references. Batches of `--batch-size`.
+   run it references. Batches of `--batch-size`. Amendment 2026-09-08: the
+   rows the chain seeds on an empty database (today: the default
+   organisation from `b7c8d9e0f1a2`) are deleted before the copy, so the
+   target holds exactly the source's rows; pre-flight has just proved the
+   target empty, so nothing else can be there. The copy order is
+   `sort_tables_and_constraints` breaking cycles at nullable keys only,
+   with every forward reference patched afterwards -- so neither the
+   `Base.metadata.sorted_tables` order nor the `runs`-read-by
+   `created_at, id` exception above applies any more.
 3. **Ruling 8 (orphan policy)** — applied to the copy stream, not the
    source: a nullable dangling foreign key is written as `NULL`; a row whose
    non-nullable foreign key dangles is skipped. Both are counted and printed
