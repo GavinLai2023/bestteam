@@ -13,11 +13,11 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from bestteam.exceptions import ConfigurationError
-from helpers import create_user_and_login, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import email_tools
 from ui.backend import main as backend_main
 from ui.backend import org_settings
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.builder_sessions import create_session, update_session
 from ui.backend.db.email_credentials import get_email_credentials, set_email_credentials
 from ui.backend.db.orgs import get_or_create_org
@@ -80,7 +80,7 @@ def client(monkeypatch, tmp_path):
     # same primitive the stored credential will use at run time.
     monkeypatch.setattr(email_tools, "_ImapBackend", _FakeBackend)
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

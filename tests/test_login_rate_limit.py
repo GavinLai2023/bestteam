@@ -13,7 +13,7 @@ pytestmark = pytest.mark.integration
 fastapi = pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, make_test_engine
 
 from ui.backend import auth_api
 from ui.backend.login_rate_limit import LoginRateLimiter
@@ -140,14 +140,14 @@ def test_a_huge_username_costs_a_fixed_size_key():
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend import main as backend_main
     from ui.backend.db import init_db, session_factory
     from ui.backend.db_session import get_db
 
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

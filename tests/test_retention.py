@@ -6,7 +6,8 @@ pytestmark = pytest.mark.integration
 
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.orgs import create_org
 from ui.backend.db.retention import (
     get_retention_settings,
@@ -18,7 +19,7 @@ from ui.backend.db.retention import (
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
@@ -80,6 +81,9 @@ def _run(db, org_id, *, run_id="r1", status="completed", age_days=0):
         org_id=org_id, created_at=created,
     )
     db.add(run)
+    # The run row is the parent of all three rows below; flush it first so it
+    # exists before anything references it.
+    db.flush()
     db.add(TraceEventRecord(run_id=run_id, seq=1, type="agent_completed",
                             agent="writer", data='{"text": "alice@example.com"}'))
     db.add(UsageRecord(run_id=run_id, agent="writer", model="fake:",

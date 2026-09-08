@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import AutomationItemResult, Run, TraceEventRecord, UsageRecord
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
@@ -24,7 +24,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -53,6 +53,9 @@ def _seed_run(db, org_id, *, run_id, status="completed", age_days=0):
         output="Drafted a reply to alice@example.com", status=status,
         org_id=org_id, created_at=created,
     ))
+    # The run row is the parent of all three rows below; flush it first so it
+    # exists before anything references it.
+    db.flush()
     db.add(TraceEventRecord(run_id=run_id, seq=1, type="agent_completed",
                             agent="writer", data='{"text": "alice@example.com"}'))
     db.add(UsageRecord(run_id=run_id, agent="writer", model="fake:",

@@ -7,7 +7,7 @@ pytestmark = pytest.mark.integration
 
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.model_catalog import (
     DEFAULT_MODEL_CATALOG,
     delete_entry,
@@ -22,7 +22,7 @@ from ui.backend.db.model_catalog import (
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
@@ -131,7 +131,7 @@ fastapi = pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, make_test_engine
 from ui.backend import main as backend_main
 from ui.backend.db_session import get_db
 
@@ -141,7 +141,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

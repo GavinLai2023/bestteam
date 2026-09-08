@@ -18,12 +18,12 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import crud as backend_crud
 from ui.backend import ingestion as backend_ingestion
 from ui.backend import knowledge_bases as backend_knowledge_bases
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, SkillRecord, PipelineRecord
 from ui.backend.db_session import get_db
 
@@ -127,11 +127,11 @@ def client(tmp_path, monkeypatch):
     # ingestion job onto `ingestion.py`'s executor, and that worker thread
     # opens its own `Session` on this same engine while the request that
     # dispatched it -- and the job-status polling below -- are still using it.
-    # `make_engine(":memory:")` backs every Session with ONE `StaticPool`
+    # `make_test_engine()` backs every Session with ONE `StaticPool`
     # connection, so those Sessions share a single transaction and a single
-    # sqlite3 cursor; see `helpers.make_concurrent_safe_engine` for why that
+    # sqlite3 cursor; see `helpers.make_test_engine` for why that
     # is a harness artefact rather than production behaviour.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -601,7 +601,7 @@ def test_dependency_freshness_changes_when_non_latest_kb_deleted():
 
     from ui.backend.db.models import KnowledgeBaseRecord
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
     with TestSessionLocal() as db:
@@ -1319,6 +1319,36 @@ def test_delete_pipeline_refused_when_a_run_references_its_version(client):
         head = db.query(PipelineRecord).filter_by(name="run_wf").one_or_none()
         assert head is not None  # head preserved
         assert db.query(PipelineVersion).filter_by(pipeline_id=head.id).count() == 1  # history intact
+
+
+def test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions():
+    """A head and its versions reference each other (`current_version_id` down,
+    `pipeline_id` up), so deleting the versions while the pointer still names
+    one is refused by any engine that enforces foreign keys -- the Postgres
+    lane does, the suite's own engine does too, production's SQLite file does
+    not. Built on its own engine so the ordering is exercised in isolation."""
+    from ui.backend.db.models import PipelineVersion
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.pipelines import publish_pipeline_version
+
+    engine = make_test_engine()
+    init_db(engine)
+    try:
+        with session_factory(engine)() as db:
+            org = get_or_create_org(db, "fk_org")
+            head, _version = publish_pipeline_version(
+                db, org_id=org.id, name="fk_wf", config=_VALID_PIPELINE_CONFIG,
+            )
+            db.commit()
+            assert head.current_version_id is not None
+
+            response = backend_crud.delete_pipeline_config("fk_wf", org="fk_org", db=db)
+
+            assert response.status_code == 204
+            assert db.query(PipelineRecord).filter_by(name="fk_wf").one_or_none() is None
+            assert db.query(PipelineVersion).count() == 0
+    finally:
+        engine.dispose()
 
 
 def test_delete_pipeline_detaches_builder_sessions(client):

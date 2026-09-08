@@ -9,7 +9,7 @@ pytestmark = pytest.mark.integration
 
 from fastapi.testclient import TestClient
 
-from helpers import get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Organization, PipelineRecord
@@ -34,10 +34,10 @@ def client(tmp_path, monkeypatch):
     # real run onto `runtime.py`'s executor, and `run_in_background` opens its
     # own `Session` on this same engine from a `bestteam-run_*` worker thread
     # while the request that dispatched it -- and every later request in the
-    # test -- are still using it. `make_engine(":memory:")` backs every Session
+    # test -- are still using it. `make_test_engine()` backs every Session
     # with ONE `StaticPool` connection, so those Sessions share a single
     # transaction and a single sqlite3 cursor; see
-    # `helpers.make_concurrent_safe_engine` for why that is a harness artefact
+    # `helpers.make_test_engine` for why that is a harness artefact
     # rather than production behaviour. The two symptoms it produced here were
     # the worker's `Session.close()` ROLLBACK landing between a request's
     # INSERT and its COMMIT (the just-created `share_sessions` row vanishes and
@@ -45,7 +45,7 @@ def client(tmp_path, monkeypatch):
     # instance" -- the CI failure this fixture change fixes) and the worker's
     # own INSERT clobbering the shared cursor's `lastrowid` mid-flush
     # ("Instance <ShareMessage ...> has a NULL identity key").
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

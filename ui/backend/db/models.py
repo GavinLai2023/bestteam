@@ -466,7 +466,10 @@ class EmailTrigger(Base):
     # counters can never disagree about which day it is.
     messages_today: Mapped[int] = mapped_column(default=0)
     # Overlap guard: skip a cycle while this run is still `running`.
-    last_run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # A loose pointer, deliberately NOT a foreign key: the dispatch CAS writes
+    # it in the statement before the `runs` row is inserted, so a key here
+    # would refuse every autonomous run on an engine that enforces one.
+    last_run_id: Mapped[Optional[str]] = mapped_column(nullable=True)
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(nullable=True)
     # "mailbox" (connectivity/credentials -- auto-clears on the next
@@ -538,7 +541,11 @@ class InboxEvent(Base):
     external_id: Mapped[str]
     # pending | claimed | done | failed | filtered
     status: Mapped[str] = mapped_column(default="pending")
-    run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
+    # A loose pointer, deliberately NOT a foreign key: the claim is committed
+    # before the pipeline is even built (so a build failure releases the
+    # messages penalty-free), which leaves it naming a run that has no row yet
+    # -- a state `runtime._release_orphaned_claims` reconciles at startup.
+    run_id: Mapped[Optional[str]] = mapped_column(nullable=True)
     # Charged when a run is actually dispatched, never at claim -- see
     # db/inbox_events.py::mark_dispatched.
     attempts: Mapped[int] = mapped_column(default=0)

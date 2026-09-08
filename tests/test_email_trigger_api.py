@@ -12,10 +12,10 @@ from cryptography.fernet import Fernet
 from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import email_trigger_api
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import (
     AUTH_MICROSOFT_OAUTH,
     MICROSOFT_IMAP_HOST,
@@ -49,7 +49,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.delenv("BESTTEAM_TRIGGERS_DISABLED", raising=False)
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

@@ -19,7 +19,7 @@ pytest.importorskip("sqlalchemy")
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import PipelineRecord, Run, ShareMessage, User
@@ -40,7 +40,7 @@ def rig(tmp_path, monkeypatch):
     """client + bearer headers for alice (org_a member) and op (platform admin)."""
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

@@ -45,8 +45,10 @@ def duplicate_org_members(bind) -> list[tuple]:
     return list(
         bind.execute(
             sa.text(
+                # HAVING repeats the aggregate: only SQLite lets HAVING refer
+                # to a SELECT alias.
                 "SELECT org_id, COUNT(*) AS n FROM users "
-                "WHERE org_id IS NOT NULL GROUP BY org_id HAVING n > 1"
+                "WHERE org_id IS NOT NULL GROUP BY org_id HAVING COUNT(*) > 1"
             )
         ).fetchall()
     )

@@ -7,14 +7,14 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
 from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
 from ui.backend.runtime import registry, run_in_background
 
 
 def _engine(tmp_path):
-    e = make_concurrent_safe_engine(tmp_path)
+    e = make_test_engine(tmp_path)
     init_db(e)
     return e
 
@@ -50,15 +50,25 @@ def test_reuses_preexisting_run_row_and_sets_terminal_status(tmp_path):
 
 
 def test_run_in_background_stamps_pipeline_version_id(tmp_path):
+    from ui.backend.db.orgs import get_or_create_org
+    from ui.backend.db.pipelines import publish_pipeline_version
+
     engine = _engine(tmp_path)
     Session = session_factory(engine)
     wf = _pipeline(tmp_path)
     run = registry.create("w", "in")
+    # `runs.pipeline_version_id` is a foreign key, so stamp a version that
+    # exists rather than an invented id.
+    with Session() as s:
+        org = get_or_create_org(s, "acme")
+        _record, version = publish_pipeline_version(s, org_id=org.id, name="w", config={"name": "w"})
+        s.commit()
+        version_id = version.id
 
-    run_in_background(run.id, wf, "in", engine=engine, pipeline_version_id=42)
+    run_in_background(run.id, wf, "in", engine=engine, pipeline_version_id=version_id)
 
     with Session() as s:
-        assert s.get(Run, run.id).pipeline_version_id == 42
+        assert s.get(Run, run.id).pipeline_version_id == version_id
 
 
 def test_run_in_background_leaves_version_null_when_absent(tmp_path):

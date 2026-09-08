@@ -9,8 +9,14 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("fastapi")
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.db import init_db, make_engine, session_factory
-from ui.backend.db.models import IngestionJob, KnowledgeBaseRecord, Run, RunKnowledgeGeneration
+from ui.backend.db import init_db, session_factory
+from ui.backend.db.models import (
+    IngestionJob,
+    KnowledgeBaseRecord,
+    Organization,
+    Run,
+    RunKnowledgeGeneration,
+)
 from ui.backend.db.run_knowledge_generations import (
     delete_for_jobs,
     delete_for_run,
@@ -21,10 +27,13 @@ from ui.backend.db.run_knowledge_generations import (
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
+        # Every KB, job and run in this module is stamped org_id=1.
+        session.add(Organization(id=1, name="acme"))
+        session.commit()
         yield session
 
 
@@ -98,7 +107,7 @@ def test_delete_for_jobs_drops_every_reference_to_those_jobs(db):
 # --- runtime writes the reference ----------------------------------------------
 
 from bestteam.core.trace import TraceEvent
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend import runtime
 from ui.backend.runtime import registry, run_in_background
 
@@ -129,8 +138,11 @@ class _SearchesTwicePipeline:
 
 @pytest.fixture
 def file_engine(tmp_path):
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    with session_factory(engine)() as session:
+        session.add(Organization(id=1, name="acme"))
+        session.commit()
     return engine
 
 

@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import pytest
 
-from ui.backend.db.database import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db.database import init_db, session_factory
 from ui.backend.db.email_triggers import list_enabled_triggers, upsert_email_trigger
 from ui.backend.db.orgs import create_org, get_org_by_name, set_org_active
 
 pytestmark = pytest.mark.unit
 
 def _session():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     return session_factory(engine)()
 

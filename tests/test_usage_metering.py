@@ -132,7 +132,7 @@ def test_tool_reported_usage_survives_a_failing_tool_call():
 
 pytest.importorskip("sqlalchemy")
 
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db.models import Run
@@ -142,7 +142,7 @@ from ui.backend.runtime import registry, run_in_background
 
 @pytest.fixture
 def db_session_factory(tmp_path):
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     return engine, session_factory(engine)
 
@@ -150,6 +150,10 @@ def db_session_factory(tmp_path):
 def test_record_usage_without_catalog_entry_has_no_cost_estimate(db_session_factory):
     _, Session = db_session_factory
     with Session() as db:
+        # `usage_records.run_id` is a foreign key: write the run first.
+        db.add(Run(id="run1", pipeline="wf", input="in", status="completed"))
+        db.commit()
+
         record = record_usage(db, run_id="run1", agent="a", model="unknown-model", input_tokens=10, output_tokens=5)
 
         assert record.cost_estimate is None
@@ -158,6 +162,9 @@ def test_record_usage_without_catalog_entry_has_no_cost_estimate(db_session_fact
 def test_record_usage_with_catalog_entry_computes_cost(db_session_factory):
     _, Session = db_session_factory
     with Session() as db:
+        # `usage_records.run_id` is a foreign key: write the run first.
+        db.add(Run(id="run1", pipeline="wf", input="in", status="completed"))
+        db.commit()
         upsert_entry(db, "openai:gpt-4o-mini", display_name="Quick", input_price_per_1k=0.001, output_price_per_1k=0.002)
 
         record = record_usage(db, run_id="run1", agent="a", model="openai:gpt-4o-mini", input_tokens=1000, output_tokens=1000)

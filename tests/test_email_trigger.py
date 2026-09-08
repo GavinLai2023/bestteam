@@ -7,6 +7,7 @@ pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 pytest.importorskip("fastapi")
 
+from helpers import make_test_engine
 from ui.backend import email_trigger
 from ui.backend.email_trigger import check_mailbox, mailbox_state
 
@@ -93,7 +94,7 @@ from datetime import datetime, timedelta, timezone
 
 from cryptography.fernet import Fernet
 
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.email_credentials import set_email_credentials
 from ui.backend.db.email_triggers import get_email_trigger, upsert_email_trigger
 from ui.backend.db.orgs import get_or_create_org
@@ -103,7 +104,7 @@ from ui.backend.email_trigger import daily_cap, poll_org
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSession = session_factory(engine)
     session = TestSession()
@@ -415,7 +416,12 @@ def test_triggered_run_stamps_builder_returned_version_not_a_requery(db, monkeyp
     monkeypatch.setattr(email_trigger, "_executor", recorder)
     # The builder reports a DIFFERENT version than the current pointer -- as if a
     # redeploy landed after the build read. The run must record the built one.
-    stale = version.id + 999
+    # `runs.pipeline_version_id` is a foreign key, so that version has to be a
+    # real row: publish v2 to move the pointer, and keep naming v1.
+    stale = version.id
+    _, current = publish_pipeline_version(db, org_id=org.id, name="triage", config={"v": 2})
+    db.commit()
+    assert current_version_id(db, org.id, "triage") == current.id != stale
     poll_org(db, trigger, _fake_pipeline_getter([], version_id=stale))
 
     run_id = recorder.calls[0][1][0]
@@ -527,6 +533,7 @@ def test_start_triggered_run_normalizes_before_publishing_run_failed_when_submit
     assert rows_seen_at_publish_time == [2]  # already committed before run_failed was published
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     # If the customer disconnects/replaces the mailbox WHILE this cycle's
     # pipeline is being built, org_settings.py/admin.py disable the trigger
@@ -560,6 +567,7 @@ def test_start_triggered_run_discards_if_disabled_mid_build(db, monkeypatch):
     assert all(e.status == "pending" and e.attempts == 0 for e in db.query(InboxEvent))
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_start_triggered_run_discards_if_disabled_after_enabled_check(db, monkeypatch):
     # The mid-build test above disables BEFORE the poller's enabled-check. This
     # covers the narrower window the check-then-commit split left open: a disable
@@ -1561,6 +1569,7 @@ def test_poll_org_blocks_on_the_per_org_dispatch_lock(db, monkeypatch):
     assert len(recorder.calls) == 1
 
 
+@pytest.mark.sqlite_only  # a second Session commits while this one holds an uncommitted write
 def test_retry_discards_if_the_trigger_is_disabled_before_the_atomic_advance(db, monkeypatch):
     """Unlike _start_triggered_run, retry_triggered_run's dispatch update
     previously had no enabled/active guard at all -- a customer
@@ -2843,3 +2852,59 @@ def test_poll_once_reconciles_draft_outcomes_per_org(db, monkeypatch):
 
     poll_once(_no_pipeline, session_factory=_Factory())
     assert reconciled == [a.id, b.id]
+
+
+# --- with foreign keys enforced (Postgres always does) ------------------------
+
+
+def test_start_triggered_run_dispatches_when_foreign_keys_are_enforced(tmp_path, monkeypatch):
+    """Both run pointers this path writes name a `runs` row that does not exist
+    yet, by design: the claim (`inbox_events.run_id`) is committed before any
+    pipeline build is attempted, so a build failure releases the messages
+    penalty-free, and the dispatch CAS writes `email_triggers.last_run_id` in
+    the statement before the row is inserted. Were either a foreign key, every
+    autonomous run would be refused by an engine that enforces them -- Postgres
+    always does, and so does the suite's own engine. Built on its own engine so
+    the dispatch is exercised in isolation, the same way `test_crud_api.py::
+    test_delete_pipeline_releases_the_head_pointer_before_dropping_its_versions`
+    does.
+    """
+    from bestteam import (
+        AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification,
+    )
+    from ui.backend.db.models import InboxEvent, Run
+
+    monkeypatch.setenv("BESTTEAM_SECRETS_KEY", Fernet.generate_key().decode())
+    engine = make_test_engine(tmp_path)
+    init_db(engine)
+    pipeline = validate_specification(
+        Specification(
+            name="triage",
+            agents=[AgentSpec(name="a", role="R", goal="g", model="fake:done")],
+            teams=[TeamSpec(name="t", agents=["a"], mode="sequential")],
+            pipeline=PipelineSpec(steps=["t"]),
+        ),
+        source=tmp_path / "triage.yaml",
+    )
+    try:
+        with session_factory(engine)() as db:
+            org, trigger = _org_with_trigger(db, last_uid=41, uidvalidity=3)
+            db.commit()
+            monkeypatch.setattr(email_trigger, "check_mailbox", lambda b, u: (3, 42, [42]))
+            recorder = _SubmitRecorder()
+            monkeypatch.setattr(email_trigger, "_executor", recorder)
+
+            poll_org(db, trigger, lambda *args: (pipeline, None))  # no IntegrityError
+
+            row = db.query(InboxEvent).one()
+            assert (row.status, row.run_id) == ("claimed", trigger.last_run_id)
+            assert db.get(Run, trigger.last_run_id) is not None
+
+            # ...and the run that was dispatched against those pointers still
+            # reaches a terminal status.
+            fn, args, kwargs = recorder.calls[0]
+            fn(*args, **kwargs)
+            db.expire_all()
+            assert db.get(Run, trigger.last_run_id).status == "completed"
+    finally:
+        engine.dispose()

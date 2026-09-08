@@ -11,9 +11,9 @@ from fastapi.testclient import TestClient
 
 from bestteam import SqliteBM25Memory
 from bestteam.core.memory import EPISODIC, SEMANTIC
-from helpers import create_user_and_login, get_org_id
+from helpers import create_user_and_login, get_org_id, make_test_engine
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db_session import get_db
 
 
@@ -31,7 +31,7 @@ def memory_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def admin_client(monkeypatch):
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

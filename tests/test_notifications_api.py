@@ -11,10 +11,10 @@ pytest.importorskip("cryptography")
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, make_test_engine
 from ui.backend import main as backend_main
 from ui.backend import notifications as notifications_module
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.notifications import create_notification
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
@@ -28,7 +28,7 @@ def ctx(monkeypatch, tmp_path):
     # The settings route resolves DNS for real; these tests are about the API.
     monkeypatch.setattr(notifications_module, "check_host_allowed", lambda h: "1.2.3.4")
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

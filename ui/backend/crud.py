@@ -666,6 +666,13 @@ def delete_pipeline_config(
             db.query(PipelineDependency).filter(
                 PipelineDependency.pipeline_version_id.in_(version_ids)
             ).delete(synchronize_session=False)
+        # The head and its versions point at each other (`current_version_id`
+        # down, `pipeline_id` up), so the pointer has to be let go of before
+        # the rows it names are deleted -- otherwise an engine that enforces
+        # foreign keys refuses the DELETE below. Flushed, not just assigned:
+        # a bulk `Query.delete()` must not be the statement that carries it.
+        item.current_version_id = None
+        db.flush()
         db.query(PipelineVersion).filter_by(pipeline_id=item.id).delete()
         db.delete(item)
         db.commit()

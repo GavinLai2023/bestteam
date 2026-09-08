@@ -4,7 +4,8 @@ import pytest
 from bestteam import validate_specification
 from bestteam.core.specification import AgentSpec, Specification, TeamSpec, PipelineSpec
 from bestteam.tools import REGISTRY
-from ui.backend.db import SkillRecord, SkillVersion, init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import SkillRecord, SkillVersion, init_db, session_factory
 from ui.backend.skills import DEFAULT_SKILLS, load_skills, seed_default_skills
 
 
@@ -14,7 +15,7 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def db_session():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:

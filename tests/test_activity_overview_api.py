@@ -13,9 +13,9 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, open_test_db
+from helpers import create_user_and_login, make_test_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db_session import get_db
@@ -26,7 +26,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

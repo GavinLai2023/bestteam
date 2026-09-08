@@ -7,7 +7,8 @@ pytest.importorskip("sqlalchemy")
 
 pytestmark = pytest.mark.integration
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.db.models import PipelineRecord
 from ui.backend.db.share_links import (
@@ -23,7 +24,7 @@ from ui.backend.db.users import create_user
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     session = Session()

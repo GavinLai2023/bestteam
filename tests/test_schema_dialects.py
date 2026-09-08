@@ -41,3 +41,15 @@ def test_no_migration_uses_an_integer_literal_as_a_boolean_default():
     pattern = re.compile(r'sa\.Boolean\(\)[^\n]*server_default=sa\.text\("[01]"\)')
     offenders = sorted(p.name for p in _VERSIONS.glob("*.py") if pattern.search(p.read_text(encoding="utf-8")))
     assert offenders == []
+
+
+def test_the_two_run_pointers_are_not_foreign_keys():
+    # The email trigger commits a claim (`inbox_events.run_id`) and the
+    # dispatch CAS (`email_triggers.last_run_id`) before the `runs` row
+    # exists, by design (a crash mid-build must leave the claim for the
+    # startup sweep). A key that the design violates by construction would
+    # refuse every autonomous run on Postgres, so these two are loose pointers.
+    from ui.backend.db.models import EmailTrigger, InboxEvent
+
+    assert not EmailTrigger.__table__.c.last_run_id.foreign_keys
+    assert not InboxEvent.__table__.c.run_id.foreign_keys

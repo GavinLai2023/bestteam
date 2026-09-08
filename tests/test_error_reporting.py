@@ -14,7 +14,7 @@ pytest.importorskip("sqlalchemy")
 
 from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 from bestteam.core.trace import TraceEvent
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend import error_reporting
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
@@ -168,7 +168,7 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.setattr(backend_main, "PIPELINES_DIR", tmp_path)
     backend_main._pipeline_cache.clear()
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -222,7 +222,7 @@ def _pipeline(tmp_path):
 
 
 def _engine(tmp_path):
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     return engine
 

@@ -4,10 +4,17 @@ import pytest
 pytestmark = pytest.mark.integration
 pytest.importorskip("sqlalchemy")
 
-from ui.backend.db import init_db, make_engine
+from helpers import make_test_engine
+from ui.backend.db import init_db
 from ui.backend.db.database import session_factory
 from ui.backend.db.dependencies import record_version_dependencies, pipelines_referencing
-from ui.backend.db.models import KnowledgeBaseRecord, SkillRecord, SkillVersion, PipelineDependency
+from ui.backend.db.models import (
+    KnowledgeBaseRecord,
+    Organization,
+    SkillRecord,
+    SkillVersion,
+    PipelineDependency,
+)
 from ui.backend.db.skills import publish_skill_version
 from ui.backend.db.pipelines import publish_pipeline_version
 from ui.backend.skills import load_skills
@@ -15,9 +22,13 @@ from ui.backend.skills import load_skills
 
 @pytest.fixture
 def db():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     session = session_factory(engine)()
+    # Every skill, KB and pipeline below is stamped org_id=7 (org_id=None is
+    # the platform built-in); write that organisation before its rows.
+    session.add(Organization(id=7, name="acme"))
+    session.commit()
     try:
         yield session
     finally:

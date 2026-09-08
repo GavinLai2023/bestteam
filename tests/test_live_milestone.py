@@ -134,12 +134,12 @@ def test_no_sink_means_no_change():
 def test_a_run_publishes_agent_working_transiently_and_persists_nothing_for_it(tmp_path, monkeypatch):
     """End to end through the real worker: node -> SDK sink -> registry."""
     from bestteam import AgentSpec, PipelineSpec, Specification, TeamSpec, validate_specification
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import TraceEventRecord
     from ui.backend.runtime import registry, run_in_background
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
 

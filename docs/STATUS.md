@@ -6,6 +6,29 @@
 
 ## Done
 
+- **The backend suite runs against Postgres on every backend PR, and the
+  SQLite suite enforces foreign keys** (2026-09-07, PR 2 of 3 for
+  `specs/2026-09-07-database-engine-portability-design.md`). One test-engine
+  entry point (`make_test_engine`) replaced every direct engine construction in
+  the suite (about 120 call sites across 66 test files); on the
+  `backend-postgres` lane every call is a fresh database cloned from a
+  per-session template and dropped after the test. The
+  42-migration chain replays on Postgres and lands on exactly `create_all`'s
+  tables and columns. The Postgres replay now compares foreign-key sets too;
+  that comparison found five keys the chain had never declared (columns added
+  by bare `batch.add_column`), repaired for Postgres by migration
+  `a4b5c6d7e8f9`. Enforcing foreign keys in the test engine found 15
+  fixture defects and 2 product defects — a team delete dropped versions its
+  head pointer still named, and the email trigger's claim
+  (`inbox_events.run_id`) and dispatch token (`email_triggers.last_run_id`)
+  were declared as keys the design violates by construction (they are loose
+  pointers now, migration `z3a4b5c6d7e8`); the run failure path also wrote its
+  `run_failed` trace before its own `runs` row (the three 2026-09-05 orphans)
+  and now writes the row first. The lane itself found three more: SQLite-only
+  assumptions in old migrations, aware datetimes shifted by a non-UTC server
+  session (now pinned to UTC), and `record_events` counting -1 new rows on
+  psycopg. Lane duration: 8m38s.
+
 - **The database is chosen by one URL; the code is Postgres-ready, production
   stays on SQLite** (2026-09-07, PR 1 of 3 for
   `specs/2026-09-07-database-engine-portability-design.md`).
@@ -2424,6 +2447,18 @@
   decoding against a backend no test tenant has ever exercised (see the entry
   above) — deliberately not started; recorded so it is not discovered by a
   customer.
+- **Three pre-cutover items the Postgres lane surfaced but did not fix**
+  (2026-09-07, PR 2 of the database-engine-portability spec).
+  `runtime._safe_record_knowledge_generation` inserts
+  `run_knowledge_generations.ingestion_job_id` naming an already-pruned job —
+  the SQLite file accepts the stale pointer, Postgres refuses the insert and
+  the audit row is lost; `alembic/env.py` builds its own engine without the
+  UTC session pin, so `b7c8d9e0f1a2`'s default-organisation seed lands in the
+  server's local time on a non-UTC Postgres (one cosmetic row); and delete
+  order is load-bearing everywhere (`crud.py`, `knowledge_bases.py` delete
+  children by hand because nothing cascades) — how the team-delete defect in
+  PR 2 happened. All three belong to the ops half of the spec, before the
+  cutover window.
 - **Horizontal scale-out of the email poller is blocked on in-process state,
   not on the poller or the engine.** The engine half is done (2026-09-07,
   PR 1 of `specs/2026-09-07-database-engine-portability-design.md`:

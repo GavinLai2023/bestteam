@@ -13,9 +13,9 @@ pytest.importorskip("openai")  # these tests patch openai.OpenAI; skip when the 
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login
+from helpers import create_user_and_login, make_test_engine
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db_session import get_db
 from ui.backend.interview import InterviewExtraction
 
@@ -26,7 +26,7 @@ def client(tmp_path, monkeypatch):
     backend_main._pipeline_cache.clear()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

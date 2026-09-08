@@ -10,9 +10,9 @@ pytestmark = pytest.mark.integration
 
 from fastapi.testclient import TestClient
 
-from helpers import create_user_and_login, get_org_id, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import PipelineRecord
 from ui.backend.db_session import get_db
 
@@ -26,7 +26,7 @@ _TEAM_CONFIG = {
 
 @pytest.fixture
 def client():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 

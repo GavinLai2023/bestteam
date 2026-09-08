@@ -8,7 +8,7 @@ pytest.importorskip("sqlalchemy")
 
 pytestmark = pytest.mark.integration
 
-from helpers import make_concurrent_safe_engine
+from helpers import make_test_engine
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run
 from ui.backend.db.orgs import get_or_create_org
@@ -22,7 +22,7 @@ from ui.backend.share_transcript import record_share_reply
 
 @pytest.fixture
 def db(tmp_path):
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     Session = session_factory(engine)
     session = Session()

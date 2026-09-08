@@ -1303,6 +1303,64 @@ def test_the_runs_internal_error_column_upgrades_and_downgrades(tmp_path, monkey
         engine.dispose()
 
 
+def test_loose_run_pointers_migration_drops_and_restores_the_keys(tmp_path, monkeypatch):
+    """`inbox_events.run_id` and `email_triggers.last_run_id` are both written
+    before the `runs` row they name exists, so at head neither is a foreign key
+    any more (z3a4b5c6d7e8).
+
+    The downgrade is the half worth covering: `ALTER TABLE ... ADD CONSTRAINT`
+    validates the rows already there, so the pointers the upgrade legalised
+    have to be nulled before the keys can go back. This exercises it on a
+    chain-built database -- the only shape where the constraints ever existed
+    to be dropped, since `create_all` from the current models declares neither.
+    """
+    db_path = tmp_path / "loose_pointers.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    try:
+        assert not _has_fk(engine, "inbox_events", "run_id", "runs")
+        assert not _has_fk(engine, "email_triggers", "last_run_id", "runs")
+
+        # Exactly the state the upgrade makes legal: a claim and a dispatch
+        # guard naming a run that was never persisted. Keys are off on this
+        # file, so the raw inserts land whatever the schema says.
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO organizations (id, name, display_name, active) "
+                "VALUES (99, 'acme', '', 1)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO inbox_events (org_id, connector_type, mailbox_identity, "
+                "mailbox_generation, external_id, status, run_id, attempts, detected_at) "
+                "VALUES (99, 'imap', 'm', '3', '42', 'claimed', 'never-written', 1, "
+                "CURRENT_TIMESTAMP)"
+            ))
+            conn.execute(sa.text(
+                "INSERT INTO email_triggers (org_id, pipeline_name, enabled, last_uid, "
+                "runs_today, messages_today, consecutive_faults, last_run_id) "
+                "VALUES (99, 'w', 1, 0, 0, 0, 0, 'never-written')"
+            ))
+
+        command.downgrade(cfg, "y2z3a4b5c6d7")
+
+        with engine.connect() as conn:
+            assert conn.execute(sa.text("SELECT run_id FROM inbox_events")).scalar() is None
+            assert conn.execute(sa.text("SELECT last_run_id FROM email_triggers")).scalar() is None
+            # Nothing dangles under the restored keys -- the check SQLite skips
+            # while enforcement is off.
+            assert conn.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert _has_fk(engine, "inbox_events", "run_id", "runs")
+        assert _has_fk(engine, "email_triggers", "last_run_id", "runs")
+
+        command.upgrade(cfg, "head")
+        assert not _has_fk(engine, "inbox_events", "run_id", "runs")
+        assert not _has_fk(engine, "email_triggers", "last_run_id", "runs")
+    finally:
+        engine.dispose()
+
+
 def test_a_preset_config_url_beats_the_environment(tmp_path, monkeypatch):
     """`alembic/env.py` must not override a URL the caller set on the Config --
     that is how `admin migrate-db` and the Postgres replay test target a

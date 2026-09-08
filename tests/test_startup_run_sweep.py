@@ -16,7 +16,8 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient
 
-from ui.backend.db import init_db, make_engine, session_factory
+from helpers import make_test_engine
+from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import InboxEvent, Run
 from ui.backend.db.orgs import get_or_create_org
 from ui.backend.runtime import INTERRUPTED_RUN_MESSAGE, fail_interrupted_runs
@@ -32,7 +33,7 @@ def _seed(Session):
 
 
 def test_fail_interrupted_runs_marks_running_rows_failed_and_leaves_terminal_rows_alone():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     _seed(Session)
@@ -56,7 +57,7 @@ def test_fail_interrupted_runs_releases_the_inbox_events_the_dead_run_had_claime
     # hung run: the messages are innocent and nothing ever reached a terminal
     # event for them, so hand them back (or dead-letter the exhausted ones)
     # rather than leaving them `claimed` by a run that will never finish.
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -87,7 +88,7 @@ def test_fail_interrupted_runs_releases_the_inbox_events_the_dead_run_had_claime
 def test_lifespan_sweeps_orphaned_running_runs(monkeypatch):
     from ui.backend import main as backend_main
 
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     _seed(Session)
@@ -112,7 +113,7 @@ def test_a_claim_whose_run_row_was_never_written_is_released():
     `claimed` forever, invisible to both `claim_events` and
     `has_pending_events`.
     """
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -145,7 +146,7 @@ def test_a_claim_left_by_a_run_that_already_reached_a_terminal_status_is_release
     leaves the row terminal and its claims outstanding, which the `running`
     query also cannot see.
     """
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:
@@ -167,7 +168,7 @@ def test_a_claim_left_by_a_run_that_already_reached_a_terminal_status_is_release
 
 
 def test_the_orphan_sweep_leaves_pending_and_completed_events_alone():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as db:

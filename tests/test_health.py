@@ -12,12 +12,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from helpers import make_test_engine
 from ui.backend import main as backend_main
-from ui.backend.db import init_db, make_engine, session_factory
+from ui.backend.db import init_db, session_factory
 
 
 def test_health_reports_ok_when_the_database_answers(monkeypatch):
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     monkeypatch.setattr(backend_main, "SessionLocal", session_factory(engine))
 

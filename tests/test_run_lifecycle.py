@@ -15,6 +15,20 @@ from ui.backend import runtime
 from ui.backend.registry import RunRegistry
 
 
+def _seed_org(engine, org_id=1):
+    """Write the organisation the triggered-run tests stamp on their runs.
+
+    `runs.org_id` is a foreign key, so the organisation has to exist before
+    any `Run` row (or `run_in_background`'s own insert) names it.
+    """
+    from ui.backend.db import session_factory
+    from ui.backend.db.models import Organization
+
+    with session_factory(engine)() as session:
+        session.add(Organization(id=org_id, name="acme"))
+        session.commit()
+
+
 # --- CR-003 -----------------------------------------------------------------
 
 
@@ -78,7 +92,7 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
 
     from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
 
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -94,8 +108,9 @@ def test_normalize_run_result_commits_before_the_terminal_event_is_published(tmp
             "needs_human": False, "human_reason": "",
         }],
     })
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
     spec = Specification(
         name="w",
@@ -144,7 +159,7 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -172,8 +187,9 @@ def test_out_of_batch_tool_outcome_forces_needs_attention_even_if_the_model_did_
             )
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -201,7 +217,7 @@ def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path)
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -232,8 +248,9 @@ def test_failed_attachment_read_forces_needs_attention_for_its_message(tmp_path)
             )
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -267,7 +284,7 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
     Needs-attention -- including when the run is cancelled, not just failed
     outright. _mark_cancelled previously never normalized the run at all
     (Codex review finding)."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -278,8 +295,9 @@ def test_cancelled_triggered_run_gets_synthetic_error_rows_for_its_batch(tmp_pat
         def stream(self, *args, **kwargs):
             raise AssertionError("must not stream once cancellation was requested up front")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("w", "in", org_id=1, username="email-trigger")
@@ -304,7 +322,7 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
     compile failure) before pipeline.stream() ever yields a single event --
     the outer except-Exception fallback previously never normalized either
     (Codex review finding)."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -315,8 +333,9 @@ def test_worker_exception_before_any_event_still_normalizes_the_triggered_batch(
         def stream(self, *args, **kwargs):
             raise RuntimeError("internal compile detail")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
@@ -348,7 +367,7 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend import runtime
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run, TraceEventRecord
@@ -376,8 +395,9 @@ def test_pm_contract_run_redacts_raw_agent_output_from_publish_and_persisted_tra
             yield _TE(type="agent_completed", pipeline="wf", agent="responder", data=envelope)
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -422,7 +442,7 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypa
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend import runtime
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run, TraceEventRecord
@@ -463,8 +483,9 @@ def test_pm_contract_run_redacts_hierarchical_delegate_events(tmp_path, monkeypa
             )
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -507,7 +528,7 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend import runtime
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run, TraceEventRecord
@@ -543,8 +564,9 @@ def test_pm_contract_run_redacts_the_manager_own_delegate_tool_completed_event(t
             )
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -591,7 +613,7 @@ def test_pm_contract_run_empties_unverified_grounding_labels_but_keeps_counts(tm
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend import runtime
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import Run, TraceEventRecord
@@ -623,8 +645,9 @@ def test_pm_contract_run_empties_unverified_grounding_labels_but_keeps_counts(tm
             )
             yield _TE(type="run_completed", pipeline="wf", data=envelope)
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="email-trigger")
@@ -660,7 +683,7 @@ def test_non_pm_run_keeps_grounding_checked_labels_intact(tmp_path):
     import json
 
     from bestteam.core.trace import TraceEvent as _TE
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import TraceEventRecord
     from ui.backend.runtime import registry, run_in_background
@@ -679,8 +702,9 @@ def test_non_pm_run_keeps_grounding_checked_labels_intact(tmp_path):
             )
             yield _TE(type="run_completed", pipeline="wf", data="all done")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("wf", "in", org_id=1, username="alice")
@@ -709,7 +733,7 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
     run_cancelled BEFORE committing/normalizing, so a live subscriber's
     refetch could race ahead of the synthetic error rows (Codex review
     finding)."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -720,8 +744,9 @@ def test_cancelled_triggered_run_normalizes_before_publishing_the_cancellation_e
         def stream(self, *args, **kwargs):
             raise AssertionError("must not stream once cancellation was requested up front")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("w", "in", org_id=1, username="email-trigger")
@@ -755,7 +780,7 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
     """Same ordering guarantee, for a pre-stream crash -- the outer
     except-Exception fallback previously published run_failed BEFORE
     committing/normalizing (Codex review finding)."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db, session_factory
     from ui.backend.db.models import AutomationItemResult, Run
     from ui.backend.runtime import registry, run_in_background
@@ -766,8 +791,9 @@ def test_worker_exception_before_any_event_normalizes_before_publishing_run_fail
         def stream(self, *args, **kwargs):
             raise RuntimeError("internal compile detail")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
+    _seed_org(engine)
     Session = session_factory(engine)
 
     run = registry.create("boom_wf", "in", org_id=1, username="email-trigger")
@@ -805,7 +831,7 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(tm
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session as SASession
 
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.db.models import Run
     from ui.backend.runtime import registry, run_in_background
@@ -817,7 +843,7 @@ def test_commit_failure_on_terminal_status_still_publishes_a_run_failed_event(tm
             yield TraceEvent(type="run_started", pipeline="wf", data=None)
             yield TraceEvent(type="run_completed", pipeline="wf", data="done")
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = registry.create("wf", "in")
 
@@ -915,11 +941,11 @@ def test_provider_error_text_never_reaches_subscribers_or_the_run_row(tmp_path):
     billing state. `RunDetail.tsx` renders a terminal event's `data` outside the
     "show technical" fold, so this text is customer-facing on both channels the
     backend owns: the live publish and the persisted `runs.output`."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.db.models import Run
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = runtime.registry.create("wf", "in")
 
@@ -958,10 +984,10 @@ def test_our_own_configuration_error_still_reaches_the_customer(tmp_path):
     """Only the engine's wrapper around a THIRD-PARTY exception is sanitized.
     A `BestTeamError` is our own wording, carries no provider detail, and tells
     the customer something they can act on -- blanket-sanitizing would lose it."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = runtime.registry.create("wf", "in")
 
@@ -975,11 +1001,11 @@ def test_provider_error_text_is_kept_for_an_admin_on_the_run_row(tmp_path):
     """The customer's copy is sanitized, but an operator still has to be able to
     say WHY a run failed. `runs.internal_error` is that copy: admin-only on the
     API, and purged as content like `input`/`output`."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.db.models import Run
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = runtime.registry.create("wf", "in")
 
@@ -997,11 +1023,11 @@ def test_a_worker_crash_is_also_kept_for_an_admin(tmp_path):
     Its message is sanitized for the same reason, so it needs the same
     operator-only copy -- otherwise an internal crash leaves admin with nothing
     but the container log."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.db.models import Run
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = runtime.registry.create("boom_wf", "in")
 
@@ -1039,11 +1065,11 @@ def test_a_published_event_never_carries_the_model_name(tmp_path):
 
     The event object keeps it: that is what the metering below reads, and
     `usage_records` stays the ledger the admin trace view is served from."""
-    from helpers import make_concurrent_safe_engine
+    from helpers import make_test_engine
     from ui.backend.db import init_db
     from ui.backend.db.models import UsageRecord
 
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     run = runtime.registry.create("wf", "in")
 

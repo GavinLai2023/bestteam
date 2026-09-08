@@ -27,7 +27,11 @@ CI-verified, not yet operated — `docs/DECISIONS.md`.
   `scripts/backup-db.sh` goes through the **online backup API**, not a file copy.
 - **SQLite foreign-key enforcement is off in production** — several notes
   below depend on knowing that nothing catches a dangling FK for you there.
-  Postgres always enforces, so parents must be written before children.
+  The *test* engine (`tests/helpers.py::make_test_engine`) turns it on and
+  Postgres always enforces, so the suite is where a child-before-parent write
+  is caught: write parents first, and flush before adding children —
+  SQLAlchemy has no relationship() here to order the INSERTs, so a Run added
+  in the same flush as its trace rows can be inserted after them.
 - Dialect-specific spots, all deliberate: `inbox_events._insert_for` picks the
   sqlite/postgresql `insert` for `on_conflict_do_nothing`; the users partial
   index carries both `sqlite_where` and `postgresql_where`; boolean server
@@ -209,6 +213,14 @@ Deleting a KB cascades to all four tables (`delete_kb_ingestion_data`).
   mail nothing ever ran. A run then *claims* rows (one atomic
   `UPDATE ... WHERE status='pending'`) — **batching is a claim policy now, not a
   coupling.**
+
+  ⚠️ **`inbox_events.run_id` and `email_triggers.last_run_id` are loose
+  pointers, deliberately not foreign keys** (migration `z3a4b5c6d7e8`): the
+  claim is committed before the pipeline is even built and the dispatch CAS
+  writes `last_run_id` in the statement before the `runs` row is inserted, so
+  both routinely name a run that has no row yet — a state
+  `runtime._release_orphaned_claims` reconciles at startup, and one that an
+  engine enforcing keys would otherwise refuse.
 
   Identity is `UniqueConstraint(org_id, connector_type, mailbox_identity,
   mailbox_generation, external_id)`. ⚠️ **`mailbox_generation` (the IMAP

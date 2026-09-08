@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from bestteam import AgentSpec, Requirements, Specification, TeamSpec, PipelineSpec
 from bestteam.exceptions import ConfigurationError
-from helpers import create_user_and_login, get_user_principal_id, make_concurrent_safe_engine
+from helpers import create_user_and_login, get_user_principal_id, make_test_engine
 from ui.backend import main as backend_main
 from ui.backend.builder import (
     _with_knowledge_base_catalog,
@@ -22,7 +22,7 @@ from ui.backend.builder import (
     _with_skill_catalog,
     _with_tool_catalog,
 )
-from ui.backend.db import SkillRecord, init_db, make_engine, session_factory
+from ui.backend.db import SkillRecord, init_db, session_factory
 from ui.backend.db.model_catalog import upsert_entry
 from ui.backend.db.models import KnowledgeBaseRecord
 from ui.backend.db_session import get_db
@@ -30,8 +30,8 @@ from ui.backend.db_session import get_db
 
 @pytest.fixture
 def db_session():
-    from ui.backend.db import init_db, make_engine, session_factory
-    engine = make_engine(":memory:")
+    from ui.backend.db import init_db, session_factory
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
     with Session() as session:
@@ -128,10 +128,10 @@ def client(tmp_path, monkeypatch):
 
     # Two tests in here drive real concurrency on purpose -- the deploy/
     # skill-edit lock snapshot and the delete-during-sandbox-run test -- and
-    # both were intermittently failing because `make_engine(":memory:")` gives
+    # both were intermittently failing because `make_test_engine()` gives
     # every Session in the process one shared transaction. See the helper's
     # docstring for why that silently loses writes.
-    engine = make_concurrent_safe_engine(tmp_path)
+    engine = make_test_engine(tmp_path)
 
     init_db(engine)
     TestSessionLocal = session_factory(engine)
@@ -1495,7 +1495,7 @@ def test_specification_can_reference_existing_knowledge_base_by_name(client, tmp
 
 
 def test_with_model_catalog_appends_catalog_text_when_present():
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
 
@@ -1618,7 +1618,7 @@ def test_with_knowledge_base_catalog_includes_description(db_session):
 def test_model_catalog_prompt_hides_embedding_tier():
     """The Solution Architect picks an agent's chat model from this text; an
     embedding entry offered there would produce a team that cannot answer."""
-    engine = make_engine(":memory:")
+    engine = make_test_engine()
     init_db(engine)
     Session = session_factory(engine)
 

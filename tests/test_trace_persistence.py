@@ -14,7 +14,7 @@ fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from bestteam import AgentSpec, Specification, TeamSpec, PipelineSpec, validate_specification
-from helpers import create_user_and_login, get_org_id, make_concurrent_safe_engine, open_test_db
+from helpers import create_user_and_login, get_org_id, make_test_engine, open_test_db
 from ui.backend import main as backend_main
 from ui.backend.db import init_db, session_factory
 from ui.backend.db.models import Run, TraceEventRecord, UsageRecord, PipelineRecord, PipelineVersion
@@ -23,7 +23,7 @@ from ui.backend.runtime import registry, run_in_background
 
 
 def _engine(tmp_path):
-    e = make_concurrent_safe_engine(tmp_path)
+    e = make_test_engine(tmp_path)
     init_db(e)
     return e
 
@@ -88,8 +88,8 @@ def client(tmp_path, monkeypatch):
 
     # File-backed, not `:memory:` -- this fixture drives run_in_background,
     # which opens its own Session on a worker thread (see
-    # make_concurrent_safe_engine's docstring in helpers.py).
-    engine = make_concurrent_safe_engine(tmp_path)
+    # make_test_engine's docstring in helpers.py).
+    engine = make_test_engine(tmp_path)
     init_db(engine)
     TestSessionLocal = session_factory(engine)
 
@@ -169,8 +169,9 @@ def test_per_agent_usage_is_admin_only(client):
 
 
 def test_get_run_trace_cross_org_is_404(client):
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=other_org_id))
         db.commit()
 
     resp = client.get("/api/runs/other-org-run/trace")
@@ -190,8 +191,9 @@ def test_list_runs_by_run_id_cross_org_is_404(client):
     GET /api/runs/{id}, not silently return an empty `runs` list (Codex
     review finding: that would let a caller distinguish "not yours" from
     "doesn't exist" by diffing it against a real 404 elsewhere)."""
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
-        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=999999))
+        db.add(Run(id="other-org-run", pipeline="w", input="in", status="completed", org_id=other_org_id))
         db.commit()
 
     resp = client.get("/api/runs", params={"run_id": "other-org-run"})
@@ -336,13 +338,14 @@ def test_list_runs_defaults_to_a_bounded_page(client):
 
 def test_list_runs_filters_by_manual_pipeline_and_status(client):
     org_id = get_org_id()
+    other_org_id = get_org_id("beta")  # a real second org: runs.org_id is a foreign key
     with open_test_db() as db:
         db.add_all(
             [
                 Run(id="r-manual", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="test"),
                 Run(id="r-auto", pipeline="wf-a", input="in", status="completed", org_id=org_id, username="email-trigger"),
                 Run(id="r-other-wf", pipeline="wf-b", input="in", status="failed", org_id=org_id, username="test"),
-                Run(id="r-other-org", pipeline="wf-a", input="in", status="completed", org_id=org_id + 1000, username="test"),
+                Run(id="r-other-org", pipeline="wf-a", input="in", status="completed", org_id=other_org_id, username="test"),
             ]
         )
         db.commit()
