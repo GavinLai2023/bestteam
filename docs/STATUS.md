@@ -2464,18 +2464,20 @@
   decoding against a backend no test tenant has ever exercised (see the entry
   above) — deliberately not started; recorded so it is not discovered by a
   customer.
-- **Three pre-cutover items the Postgres lane surfaced but did not fix**
+- **Two pre-cutover items the Postgres lane surfaced but did not fix**
   (2026-09-07, PR 2 of the database-engine-portability spec).
   `runtime._safe_record_knowledge_generation` inserts
   `run_knowledge_generations.ingestion_job_id` naming an already-pruned job —
   the SQLite file accepts the stale pointer, Postgres refuses the insert and
-  the audit row is lost; `alembic/env.py` builds its own engine without the
-  UTC session pin, so `b7c8d9e0f1a2`'s default-organisation seed lands in the
-  server's local time on a non-UTC Postgres (one cosmetic row); and delete
-  order is load-bearing everywhere (`crud.py`, `knowledge_bases.py` delete
-  children by hand because nothing cascades) — how the team-delete defect in
-  PR 2 happened. All three belong to the ops half of the spec, before the
-  cutover window.
+  the audit row is lost; and delete order is load-bearing everywhere
+  (`crud.py`, `knowledge_bases.py` delete children by hand because nothing
+  cascades) — how the team-delete defect in PR 2 happened. Both belong to the
+  ops half of the spec, before the cutover window. A third — `alembic/env.py`
+  built its own engine without the UTC session pin, so `b7c8d9e0f1a2`'s
+  default-organisation seed landed in the server's local time on a non-UTC
+  Postgres — was fixed in PR 3 (2026-09-08) after a Codex review re-found
+  it: Alembic's engine now comes from `make_engine`, and the Postgres lane
+  replays the chain on a database whose default zone is not UTC.
 - Pre-cutover (ops half): on Postgres, `o2p3q4r5s6t7` cannot replay over a
   `create_all`-built schema (`DROP TABLE pipelines` is refused while other
   tables reference it), so the chain must run on an empty database before

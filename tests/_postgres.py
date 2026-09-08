@@ -114,6 +114,20 @@ def empty_database_url() -> URL:
     return url_for(name)
 
 
+def set_default_timezone(database: str, zone: str) -> None:
+    """Make `zone` the default session timezone of one test database.
+
+    A migration must store UTC whatever the server's zone is; CI's container
+    is UTC, so a test has to move the zone itself to prove that.
+    """
+    admin = _admin()
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f"""ALTER DATABASE "{database}" SET timezone TO '{zone}'"""))
+    finally:
+        admin.dispose()
+
+
 def drop_created() -> None:
     while _created:
         engine, name = _created.pop()

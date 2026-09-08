@@ -1,8 +1,5 @@
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-
 from alembic import context
 
 import os
@@ -11,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ui.backend.db.database import resolve_database_url
+from ui.backend.db.database import make_engine, resolve_database_url
 from ui.backend.db.models import Base
 
 # this is the Alembic Config object, which provides
@@ -69,23 +66,23 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
-    In this scenario we need to create an Engine
-    and associate a connection with the context.
-
+    The engine comes from the backend's own factory, so a migration runs
+    with every connection setting a deployment runs with -- above all the
+    Postgres session pinned to UTC, which decides what `CURRENT_TIMESTAMP`
+    stores in a naive column (b7c8d9e0f1a2 seeds one). Disposed at the end,
+    so no pooled connection outlives the run.
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    connectable = make_engine(config.get_main_option("sqlalchemy.url"))
+    try:
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection, target_metadata=target_metadata
+            )
 
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        connectable.dispose()
 
 
 if context.is_offline_mode():
