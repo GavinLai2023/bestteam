@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import List, Mapping, Optional, Sequence
 
 from sqlalchemy import select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from .models import InboxEvent
@@ -37,6 +37,23 @@ _IDENTITY_COLUMNS = [
     "org_id", "connector_type", "mailbox_identity",
     "mailbox_generation", "external_id",
 ]
+
+
+def _insert_for(db: Session):
+    """The dialect-specific INSERT that supports `on_conflict_do_nothing`.
+
+    SQLAlchemy's generic `insert()` has no ON CONFLICT; the sqlite and
+    postgresql constructs share the same call, so the choice is the only
+    dialect-specific line in this module (spec 2026-09-07 §4).
+    """
+    name = db.get_bind().dialect.name
+    if name == "sqlite":
+        return sqlite.insert
+    if name == "postgresql":
+        return postgresql.insert
+    raise NotImplementedError(
+        f"record_events: no ON CONFLICT insert for dialect {name!r}; bestteam supports sqlite and postgresql"
+    )
 
 
 def _utcnow() -> datetime:
@@ -78,8 +95,7 @@ def record_events(
     losing it causes messages to be re-examined and skipped, never processed
     twice.
 
-    `on_conflict_do_nothing` is SQLite-specific -- one of the places a future
-    Postgres migration would touch (that dialect offers the same call).
+    `on_conflict_do_nothing` needs the dialect's own insert construct -- `_insert_for` picks it.
     """
     if not external_ids:
         return 0
@@ -102,7 +118,7 @@ def record_events(
         for external_id in external_ids
     ]
     result = db.execute(
-        sqlite_insert(InboxEvent)
+        _insert_for(db)(InboxEvent)
         .values(rows)
         .on_conflict_do_nothing(index_elements=_IDENTITY_COLUMNS)
     )

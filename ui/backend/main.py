@@ -81,7 +81,7 @@ from .db.models import (
 )
 from .db.email_credentials import ensure_secrets_key_for_stored_credentials
 from .db.users import get_user_by_username, orgs_with_multiple_members
-from .db_session import DB_PATH, SessionLocal, get_db
+from .db_session import LOCK_ANCHOR, SessionLocal, get_db
 from .email_tools import load_email_tools
 from .knowledge_bases import (
     contain_pipeline_config_for_load,
@@ -165,7 +165,7 @@ async def _lifespan(_app):
     # poller, per-process dispatch locks) -- and the sweeps just below release
     # every outstanding inbox claim, which a second worker's startup would do
     # to claims the first worker is actively processing. Refuse before either.
-    instance_lock = process_lock.acquire_single_instance_lock(DB_PATH)
+    instance_lock = process_lock.acquire_single_instance_lock(LOCK_ANCHOR)
     with SessionLocal() as session:
         try:
             _enforce_one_member_per_org_or_raise(session)

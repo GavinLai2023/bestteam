@@ -46,7 +46,7 @@ def upgrade() -> None:
             sa.Column("source_key", sa.String(), nullable=False),
             sa.Column("result_type", sa.String(), nullable=False),
             sa.Column("status", sa.String(), nullable=False),
-            sa.Column("needs_attention", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("needs_attention", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column("payload", sa.JSON(), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False),
             sa.UniqueConstraint(

@@ -79,6 +79,7 @@ def upgrade() -> None:
         ["org_id"],
         unique=True,
         sqlite_where=sa.text("org_id IS NOT NULL"),
+        postgresql_where=sa.text("org_id IS NOT NULL"),
     )
 
 

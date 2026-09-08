@@ -3,9 +3,10 @@
 
 `check_environment` is a pure function over an environment mapping, so it is
 testable without a process and the CLI is one print loop; `check_schema`
-takes the database file, which is why it is a second function rather than
-another branch inside the first. Both only *read*: nothing here changes
-a value or starts anything, and neither creates the database. Run inside the
+takes the database URL (or the historical file path), which is why it is a
+second function rather than another branch inside the first. Both only
+*read*: nothing here changes a value or starts anything, and neither creates
+the database. Run inside the
 container (`docker compose run
 --rm --no-deps backend python -m ui.backend.admin check-env`) so it sees the
 same `.env` the backend will, not a copy on the host.
@@ -21,11 +22,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Optional, Union
-from urllib.request import pathname2url
 
 from .auth import is_insecure_secret_key
 
@@ -194,6 +193,9 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
         warn("FORWARDED_ALLOW_IPS", "unset; behind a reverse proxy every login looks like it comes from "
              "the proxy, so the per-address login budget is shared by all users")
 
+    # --- database -----------------------------------------------------------
+    out.append(check_database_url(env))
+
     return out
 
 
@@ -215,50 +217,112 @@ def has_failures(findings: List[Finding]) -> bool:
     return any(f.level == "FAIL" for f in findings)
 
 
+# --- database ------------------------------------------------------------
+
+_DATABASE = "database"
+_SUPPORTED_BACKENDS = ("sqlite", "postgresql")
+
+
+def check_database_url(env: Mapping[str, str]) -> Finding:
+    """Which database the backend will open, and whether it can.
+
+    Pure over the environment like the rest of `check_environment`: it parses
+    the URL and checks that the driver imports; it never connects.
+    `check_schema` is the one that reads.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import ArgumentError
+
+        from .db.database import describe_database_url, resolve_database_url
+    except ImportError:
+        return Finding("WARN", _DATABASE, "sqlalchemy is not installed, so the database cannot be "
+                       "checked (pip install 'bestteam[ui]')")
+    url = resolve_database_url(env)
+    try:
+        parsed = make_url(url)
+    except ArgumentError as exc:
+        return Finding("FAIL", _DATABASE, f"BESTTEAM_DATABASE_URL is not a valid database URL ({exc}). "
+                       "Example: postgresql+psycopg://user:password@host:5432/bestteam")
+    backend = parsed.get_backend_name()
+    if backend not in _SUPPORTED_BACKENDS:
+        return Finding("FAIL", _DATABASE, f"BESTTEAM_DATABASE_URL names the {backend!r} engine; "
+                       "only sqlite and postgresql are supported")
+    if backend != "sqlite":
+        try:
+            parsed.get_dialect().import_dbapi()
+        except (ImportError, ArgumentError) as exc:
+            return Finding("FAIL", _DATABASE, f"the {backend} driver is not installed ({exc}); "
+                           "install the `ui` extra: pip install 'bestteam[ui]'")
+    description = describe_database_url(url)
+    if _get(env, "BESTTEAM_DATABASE_URL") and _get(env, "BESTTEAM_DB_PATH"):
+        return Finding("WARN", _DATABASE, "both BESTTEAM_DATABASE_URL and BESTTEAM_DB_PATH are set; "
+                       f"the URL wins ({description}). Unset BESTTEAM_DB_PATH to avoid confusion")
+    return Finding("OK", _DATABASE, description)
+
+
+def default_database_url(env: Mapping[str, str]) -> str:
+    from .db.database import resolve_database_url
+
+    return resolve_database_url(env)
+
+
+def _as_url(target: Union[str, Path, None]) -> str:
+    """Accept the historical file-path argument as well as a URL."""
+    from .db.database import resolve_database_url, sqlite_url_for
+
+    if target is None:
+        return resolve_database_url({})
+    as_text = str(target)
+    return as_text if "://" in as_text else sqlite_url_for(as_text)
+
+
+def _absent_file(url: str) -> bool:
+    """True for a SQLite file URL whose file does not exist (nothing to read)."""
+    from .db.database import sqlite_path_of
+
+    path = sqlite_path_of(url)
+    return path is not None and not path.exists()
+
+
+def _read_only(url: str):
+    from .db.database import readonly_engine
+
+    return readonly_engine(url)
+
+
 # --- schema version ------------------------------------------------------
 #
 # Separate from `check_environment`, which is pure over an environment
-# mapping and must stay that way. This one needs the database file, so it
-# gets its own function and its own Finding, and the CLI appends it.
+# mapping and must stay that way. This one reads the database, so it gets
+# its own function and its own Finding, and the CLI appends it.
 
 _SCHEMA = "schema"
-
-# Keep this default in sync with ui/backend/db_session.py::DB_PATH and
-# alembic/env.py::_default_db_path.
-_DEFAULT_DB_PATH = Path(__file__).parent / "data" / "bestteam.db"
 _DEFAULT_SCRIPT_LOCATION = Path(__file__).resolve().parents[2] / "alembic"
 
 
-def default_db_path(env: Mapping[str, str]) -> Path:
-    return Path(_get(env, "BESTTEAM_DB_PATH") or _DEFAULT_DB_PATH)
-
-
-def _stamped_revision(path: Path) -> Optional[str]:
+def _stamped_revision(url: str) -> Optional[str]:
     """The database's Alembic revision, or None if it carries no stamp.
 
-    Opened read-only through a `file:` URI, so a checklist run can neither
-    create the file nor write to one that exists -- `check-env` is documented
-    as safe on a box whose database does not exist yet, and
-    `test_check_env_does_not_create_the_database` pins that. Read-only still
-    reads a live WAL database, which a plain `sqlite3.connect` on a missing
-    path would silently create instead.
+    Read-only (`db.database.readonly_engine`), so a checklist run can neither
+    create a SQLite file nor write to one that exists --
+    `test_check_env_does_not_create_the_database` pins that.
     """
-    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    from sqlalchemy import inspect, text
+
+    engine = _read_only(url)
     try:
-        stamped = con.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
-        ).fetchone()
-        if not stamped:
-            return None
-        row = con.execute("SELECT version_num FROM alembic_version").fetchone()
+        with engine.connect() as conn:
+            if not inspect(conn).has_table("alembic_version"):
+                return None
+            row = conn.execute(text("SELECT version_num FROM alembic_version")).fetchone()
     finally:
-        con.close()
+        engine.dispose()
     return row[0] if row else None
 
 
 def check_schema(
-    db_path: Union[str, Path, None] = None,
+    target: Union[str, Path, None] = None,
     *,
     script_location: Union[str, Path, None] = None,
 ) -> Finding:
@@ -272,11 +336,15 @@ def check_schema(
     than the launch that should have caught it. Hence FAIL: being behind head
     is not a preference, it is a deployment that will break somewhere.
     """
-    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
-    if str(path) == ":memory:":
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from .db.database import MEMORY_URL, describe_database_url, sqlite_path_of
+
+    url = _as_url(target)
+    if url == MEMORY_URL:
         return Finding("OK", _SCHEMA, "in-memory database; nothing to migrate")
-    if not path.exists():
-        return Finding("OK", _SCHEMA, f"no database at {path} yet; the first start creates it at "
+    if _absent_file(url):
+        return Finding("OK", _SCHEMA, f"no database at {sqlite_path_of(url)} yet; the first start creates it at "
                        "the current schema. Run `alembic upgrade head` afterwards to stamp it")
 
     try:
@@ -287,9 +355,13 @@ def check_schema(
                        "checked (pip install 'bestteam[ui]')")
 
     try:
-        stamped = _stamped_revision(path)
-    except sqlite3.Error as exc:
-        return Finding("WARN", _SCHEMA, f"could not read the schema version from {path}: {exc}")
+        stamped = _stamped_revision(url)
+    except (SQLAlchemyError, ImportError) as exc:
+        # A SQLite file that cannot be read is a warning; a server that cannot
+        # be reached is what the backend itself will die on -- FAIL.
+        level = "WARN" if sqlite_path_of(url) is not None else "FAIL"
+        return Finding(level, _SCHEMA, f"could not read the schema version from "
+                       f"{describe_database_url(url)}: {str(exc).splitlines()[0]}")
 
     script = ScriptDirectory(str(script_location or _DEFAULT_SCRIPT_LOCATION))
     head = script.get_current_head()
@@ -327,26 +399,33 @@ def check_schema(
 _ORG_RETENTION = "org-retention"
 
 
-def check_org_retention(db_path: Union[str, Path, None] = None) -> Finding:
-    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
-    if str(path) == ":memory:" or not path.exists():
+def check_org_retention(target: Union[str, Path, None] = None) -> Finding:
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from .db.database import MEMORY_URL, describe_database_url
+
+    url = _as_url(target)
+    if url == MEMORY_URL or _absent_file(url):
         return Finding("OK", _ORG_RETENTION, "no database yet; nothing to check")
 
-    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
     try:
-        con = sqlite3.connect(uri, uri=True)
+        engine = _read_only(url)
         try:
-            uncovered = [row[0] for row in con.execute(
-                "SELECT o.name FROM organizations o "
-                "LEFT JOIN org_retention_settings r ON r.org_id = o.id "
-                "WHERE r.run_retention_days IS NULL ORDER BY o.name"
-            )]
+            with engine.connect() as conn:
+                tables = inspect(conn)
+                if not (tables.has_table("organizations") and tables.has_table("org_retention_settings")):
+                    return Finding("OK", _ORG_RETENTION, "pre-migration schema; nothing to check")
+                uncovered = [row[0] for row in conn.execute(text(
+                    "SELECT o.name FROM organizations o "
+                    "LEFT JOIN org_retention_settings r ON r.org_id = o.id "
+                    "WHERE r.run_retention_days IS NULL ORDER BY o.name"
+                ))]
         finally:
-            con.close()
-    except sqlite3.Error as exc:
-        if "no such table" in str(exc):
-            return Finding("OK", _ORG_RETENTION, "pre-migration schema; nothing to check")
-        return Finding("WARN", _ORG_RETENTION, f"could not read org retention from {path}: {exc}")
+            engine.dispose()
+    except (SQLAlchemyError, ImportError) as exc:
+        return Finding("WARN", _ORG_RETENTION, f"could not read org retention from "
+                       f"{describe_database_url(url)}: {str(exc).splitlines()[0]}")
 
     if uncovered:
         return Finding("WARN", _ORG_RETENTION,
@@ -360,13 +439,13 @@ _MODEL_CATALOG = "model-catalog"
 
 # Kept in sync by hand with `db/model_catalog.py::EMBEDDING_TIER` and the
 # `fake:`/`fake-architect:` prefixes `adapters/langgraph_adapter.py::_resolve_model`
-# understands. This module reads SQLite directly rather than importing the
-# ORM, the same way `check_org_retention` does.
+# understands. This module reads the tables directly rather than importing
+# the ORM, the same way `check_org_retention` does.
 _EMBEDDING_TIER = "embedding"
 _STUB_PREFIXES = ("fake:", "fake-architect:")
 
 
-def check_model_catalog(db_path: Union[str, Path, None] = None) -> Finding:
+def check_model_catalog(target: Union[str, Path, None] = None) -> Finding:
     """WARN when the catalog holds no real chat model.
 
     The Team Builder wizard runs the Solution Architect on whatever
@@ -378,21 +457,27 @@ def check_model_catalog(db_path: Union[str, Path, None] = None) -> Finding:
     creates exactly this shape if it is ever pointed at a real database
     (observed twice on a dev box), and an admin can delete their way here.
     """
-    path = Path(db_path) if db_path is not None else _DEFAULT_DB_PATH
-    if str(path) == ":memory:" or not path.exists():
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from .db.database import MEMORY_URL, describe_database_url
+
+    url = _as_url(target)
+    if url == MEMORY_URL or _absent_file(url):
         return Finding("OK", _MODEL_CATALOG, "no database yet; nothing to check")
 
-    uri = "file:" + pathname2url(str(path)) + "?mode=ro"
     try:
-        con = sqlite3.connect(uri, uri=True)
+        engine = _read_only(url)
         try:
-            rows = list(con.execute("SELECT spec, tier FROM model_catalog"))
+            with engine.connect() as conn:
+                if not inspect(conn).has_table("model_catalog"):
+                    return Finding("OK", _MODEL_CATALOG, "pre-migration schema; nothing to check")
+                rows = list(conn.execute(text("SELECT spec, tier FROM model_catalog")))
         finally:
-            con.close()
-    except sqlite3.Error as exc:
-        if "no such table" in str(exc):
-            return Finding("OK", _MODEL_CATALOG, "pre-migration schema; nothing to check")
-        return Finding("WARN", _MODEL_CATALOG, f"could not read the model catalog from {path}: {exc}")
+            engine.dispose()
+    except (SQLAlchemyError, ImportError) as exc:
+        return Finding("WARN", _MODEL_CATALOG, f"could not read the model catalog from "
+                       f"{describe_database_url(url)}: {str(exc).splitlines()[0]}")
 
     usable = [
         spec for spec, tier in rows

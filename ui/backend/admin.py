@@ -63,11 +63,13 @@ from .db.users import (
     set_user_org,
 )
 from .env_check import (
+    Finding,
+    check_database_url,
     check_environment,
     check_model_catalog,
     check_org_retention,
     check_schema,
-    default_db_path,
+    default_database_url,
     has_failures,
 )
 
@@ -202,26 +204,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Deliberately before the database is opened (`_open_session` is what
         # imports `db_session`): the checklist must run on a box whose
         # database does not exist yet, and leave it that way.
-        db_path = default_db_path(os.environ)
-        findings = check_environment(os.environ) + [
-            check_schema(db_path),
-            check_org_retention(db_path),
-            check_model_catalog(db_path),
-        ]
+        findings = check_environment(os.environ)
+        database = next((finding for finding in findings if finding.name == "database"), None)
+        # A URL that cannot be parsed, an unsupported dialect or a missing
+        # driver is already a FAIL line; reading through it would only add a
+        # traceback on top of it.
+        if database is None or database.level != "FAIL":
+            url = default_database_url(os.environ)
+            findings += [
+                check_schema(url),
+                check_org_retention(url),
+                check_model_catalog(url),
+            ]
         return _print_findings(findings)
 
     if args.command == "check-health":
-        # Guard before `_open_session`: on a box with no database yet, opening
-        # the session would CREATE it, and a health check must not.
-        db_path = default_db_path(os.environ)
-        if str(db_path) != ":memory:" and not db_path.exists():
-            print(f"[OK]   triggers: no database at {db_path} yet; nothing to monitor")
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from .db.database import describe_database_url, sqlite_path_of
+
+        # The URL itself first: garbage, an unsupported dialect or a missing
+        # driver is reported the way `check-env` reports it -- a FAIL line
+        # and exit 1, never a traceback out of cron.
+        database = check_database_url(os.environ)
+        if database.level == "FAIL":
+            return _print_findings([database])
+        # Guard before `_open_session`: on a box with no SQLite file yet,
+        # opening the session would CREATE it, and a health check must not.
+        url = default_database_url(os.environ)
+        path = sqlite_path_of(url)
+        if path is not None and not path.exists():
+            print(f"[OK]   triggers: no database at {path} yet; nothing to monitor")
             return 0
         from .email_trigger import poll_seconds
         from .trigger_metrics import backlog_alert_seconds, collect, evaluate
 
-        with _open_session() as db:
-            metrics = collect(db)
+        try:
+            with _open_session() as db:
+                metrics = collect(db)
+        except SQLAlchemyError as exc:
+            # A server that cannot be reached, or a database that cannot be
+            # read -- the right signal from a cron job is a FAIL line.
+            return _print_findings([Finding(
+                "FAIL", "database",
+                f"cannot read {describe_database_url(url)} ({str(exc).splitlines()[0]})",
+            )])
         findings = evaluate(
             metrics,
             poll_interval_seconds=poll_seconds(),

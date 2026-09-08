@@ -493,3 +493,61 @@ def test_the_cli_includes_the_model_catalog_finding(monkeypatch, capsys, tmp_pat
     monkeypatch.setenv("BESTTEAM_DB_PATH", str(db))
     admin.main()
     assert "model-catalog" in capsys.readouterr().out
+
+
+def test_database_line_names_the_sqlite_file_by_default():
+    finding = _by_name(check_environment(_GOOD))["database"]
+    assert finding.level == "OK"
+    assert finding.message.startswith("sqlite file ")
+
+
+def test_database_line_hides_the_password_and_warns_when_both_variables_are_set():
+    pytest.importorskip("psycopg")
+    env = dict(_GOOD, BESTTEAM_DATABASE_URL="postgresql+psycopg://bt:s3cretpw@db.internal:5432/bestteam")
+    finding = _by_name(check_environment(env))["database"]
+    assert finding.level == "OK"
+    assert "s3cretpw" not in finding.message
+    assert "db.internal" in finding.message
+
+    both = dict(env, BESTTEAM_DB_PATH="/srv/bestteam.db")
+    finding = _by_name(check_environment(both))["database"]
+    assert finding.level == "WARN"
+    assert "the URL wins" in finding.message
+
+
+def test_database_line_fails_on_garbage_and_on_unsupported_engines():
+    garbage = _by_name(check_environment(dict(_GOOD, BESTTEAM_DATABASE_URL="://")))["database"]
+    assert garbage.level == "FAIL"
+    mysql = _by_name(check_environment(dict(_GOOD, BESTTEAM_DATABASE_URL="mysql+pymysql://u:p@h/d")))["database"]
+    assert mysql.level == "FAIL"
+    assert "mysql" in mysql.message
+
+
+def test_check_health_reports_an_unreachable_server_database(monkeypatch, capsys):
+    pytest.importorskip("psycopg")
+    from sqlalchemy.exc import OperationalError
+    from ui.backend import admin
+
+    monkeypatch.setenv("BESTTEAM_DATABASE_URL", "postgresql+psycopg://bt:s3cretpw@db.internal:5432/bestteam")
+    monkeypatch.delenv("BESTTEAM_DB_PATH", raising=False)
+
+    def _refuse():
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    monkeypatch.setattr(admin, "_open_session", _refuse)
+    assert admin.main(["check-health"]) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] database" in out
+    assert "s3cretpw" not in out
+
+
+def test_the_cli_reports_a_bad_database_url_instead_of_crashing(monkeypatch, capsys):
+    from ui.backend import admin
+
+    monkeypatch.delenv("BESTTEAM_DB_PATH", raising=False)
+    for bad in ("://", "mysql+pymysql://u:p@h/d"):
+        monkeypatch.setenv("BESTTEAM_DATABASE_URL", bad)
+        assert admin.main(["check-env"]) == 1
+        assert "[FAIL] database" in capsys.readouterr().out
+        assert admin.main(["check-health"]) == 1
+        assert "[FAIL] database" in capsys.readouterr().out

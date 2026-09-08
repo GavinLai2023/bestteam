@@ -37,7 +37,7 @@ def upgrade() -> None:
             sa.Column("id", sa.Integer(), primary_key=True),
             sa.Column("org_id", sa.Integer(), sa.ForeignKey("organizations.id"), nullable=False),
             sa.Column("workflow_name", sa.String(), nullable=False),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
             sa.Column("last_uid", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("uidvalidity", sa.Integer(), nullable=True),
             sa.Column("runs_today", sa.Integer(), nullable=False, server_default="0"),

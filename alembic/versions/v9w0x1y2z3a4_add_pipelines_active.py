@@ -48,7 +48,8 @@ def upgrade() -> None:
         return
     op.add_column(
         _TABLE,
-        sa.Column(_COLUMN, sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        # sa.true(): renders as 1 on SQLite and true on Postgres; sa.text("1") is rejected by Postgres.
+        sa.Column(_COLUMN, sa.Boolean(), nullable=False, server_default=sa.true()),
     )
 
 

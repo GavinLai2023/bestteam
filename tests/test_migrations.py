@@ -1301,3 +1301,20 @@ def test_the_runs_internal_error_column_upgrades_and_downgrades(tmp_path, monkey
         assert "internal_error" not in columns
     finally:
         engine.dispose()
+
+
+def test_a_preset_config_url_beats_the_environment(tmp_path, monkeypatch):
+    """`alembic/env.py` must not override a URL the caller set on the Config --
+    that is how `admin migrate-db` and the Postgres replay test target a
+    database other than the deployment's."""
+    elsewhere = tmp_path / "env.db"
+    monkeypatch.setenv("BESTTEAM_DB_PATH", str(elsewhere))
+    target = tmp_path / "preset.db"
+    cfg = Config(str(_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{target}".replace("%", "%%"))
+
+    command.upgrade(cfg, "head")
+
+    assert target.exists()
+    assert not elsewhere.exists()

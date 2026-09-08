@@ -86,12 +86,15 @@ time so the backlog never triggers.
 Specs: `2026-08-17-email-phase-{0-hardening,1-inbox-events,4a-filtering-budgets}-design.md`,
 `2026-08-22-email-poller-oauth-and-claim-scoping-design.md`.
 
-**Single-process is enforced, not assumed.** `_lifespan` takes an exclusive OS
-lock on `<db>.lock` (`process_lock.py`) before the startup sweeps, so a second
-process refuses to start rather than running a second poller. `":memory:"` skips
-it. The claim is atomic, but `RunRegistry` is in-process, so the overlap guard
-and cancellation still assume one process. Real scale-out is blocked on Postgres
-(`make_engine` hardcodes SQLite and takes a path, not a URL).
+**Single-process is enforced, not assumed.** `_lifespan` takes an exclusive
+OS lock on `<db>.lock` beside the SQLite file, or `data/bestteam.lock`
+for a server database (`process_lock.py`, `db_session.LOCK_ANCHOR`) before
+the startup sweeps, so a second process refuses to start rather than
+running a second poller. `":memory:"` skips it. The claim is atomic, but
+`RunRegistry` is in-process, so the overlap guard and cancellation still
+assume one process. Real scale-out is blocked on this in-process state,
+not on the engine (`BESTTEAM_DATABASE_URL` can already name Postgres;
+`docs/DECISIONS.md`, 2026-09-07).
 
 ### Detection vs. execution
 

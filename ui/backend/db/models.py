@@ -13,7 +13,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, UniqueConstraint, text
+from sqlalchemy import JSON, CheckConstraint, ForeignKey, Index, UniqueConstraint, text, true
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -63,7 +63,7 @@ class Organization(Base):
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     # False = deactivated (full suspend): the org's member can't log in and
     # every org-scoped surface 403s, but all data is kept and it's reversible.
-    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
+    active: Mapped[bool] = mapped_column(default=True, server_default=true())
 
 
 class User(Base):
@@ -82,6 +82,7 @@ class User(Base):
             "org_id",
             unique=True,
             sqlite_where=text("org_id IS NOT NULL"),
+            postgresql_where=text("org_id IS NOT NULL"),
         ),
     )
 
@@ -325,7 +326,7 @@ class PipelineRecord(Base):
     # learn a new value. False stops runs from every entry point -- manual,
     # automatic and shared -- while config, versions and history all stay.
     # Mirrors `organizations.active` one level down.
-    active: Mapped[bool] = mapped_column(default=True, server_default=text("1"))
+    active: Mapped[bool] = mapped_column(default=True, server_default=true())
     created_at: Mapped[datetime] = mapped_column(default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=_utcnow, onupdate=_utcnow)
     current_version_id: Mapped[Optional[int]] = mapped_column(

@@ -11,16 +11,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ui.backend.db.database import resolve_database_url
 from ui.backend.db.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# Keep this default in sync with ui/backend/db_session.py::DB_PATH.
-_default_db_path = Path(__file__).resolve().parent.parent / "ui" / "backend" / "data" / "bestteam.db"
-db_path = os.environ.get("BESTTEAM_DB_PATH", str(_default_db_path))
-config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+# The URL comes from the same resolver the backend uses (BESTTEAM_DATABASE_URL,
+# else BESTTEAM_DB_PATH) -- unless the caller already set `sqlalchemy.url` on
+# the Config (the migration tests, `admin migrate-db`), which wins. `%` is
+# doubled because ConfigParser interpolates it.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", resolve_database_url(os.environ).replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

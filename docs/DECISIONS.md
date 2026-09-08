@@ -402,7 +402,9 @@ Append new entries at the bottom using this template:
   - **The migration is not small and not started.** `make_engine` hardcodes
     SQLite and takes a *file path*, not a URL
     (`ui/backend/db/database.py:41`), and `pyproject.toml` carries no
-    Postgres driver.
+    Postgres driver. (*Superseded 2026-09-07*: `make_engine` now takes a URL
+    and `psycopg` ships in the `ui` extra — see the entry below. The
+    single-process ruling stands.)
   - **"One member per org" is an authorisation gap, not a database one.** It
     is the constraint customers will hit first, and RBAC fixes it on SQLite
     exactly as well as on Postgres.
@@ -526,3 +528,49 @@ pricing agent with `observe` colleagues.
   pre-policy payload; the three new fields (`policy`, `retried`, `refused`)
   appear only when a policy is set — dashboards keyed on the exact shape
   keep working.
+
+## Postgres is the target engine; the code supports both; SQLite stays in production until the cutover trigger
+
+- **Status**: Accepted (2026-09-07). Extends, and does not overturn, "Beta
+  runs single-process on SQLite" above: production is still one process on
+  one SQLite file.
+- **Context**: Asked what "scalability" means for the platform, the owner
+  named all four readings — more organisations and load, more than one host,
+  data that outside tools (reporting, a second product) can reach, and a
+  team larger than one. A SQLite file has no network interface and lives on
+  one host, so the last three are structurally out of its reach: Postgres is
+  a matter of *when*, not *whether*. The entry above lists only benefit-side
+  triggers; it had no cost-side one, and a cutover's cost rises with every
+  customer whose data is in the file (a rehearsal, a rollback plan, an
+  announced window). The live database held no customer organisation on
+  2026-09-07.
+- **Decision**: split the work. **Now, the code half** (spec
+  `docs/superpowers/specs/2026-09-07-database-engine-portability-design.md`):
+  one connection URL (`BESTTEAM_DATABASE_URL`, else the legacy
+  `BESTTEAM_DB_PATH`) selects the engine; the schema, queries, Alembic,
+  `check-env` and the operator CLI are dialect-neutral for sqlite and
+  postgresql; a CI lane runs the backend suite against Postgres on every
+  backend PR; `admin migrate-db` copies a database into an empty one with
+  pre-flight checks. **Later, the ops half** — provisioning, backup/restore,
+  runbooks, rehearsal, cutover — as its own spec when the trigger fires.
+- **Cutover trigger**: the first quiet week after all three first customers
+  are live and have run for two weeks, or 2026-12-01, whichever comes first.
+  Hitting it means writing the ops-half spec, not re-opening this entry.
+- **Consequences**:
+  - "Supports both" means CI-verified, not operated: nothing in production
+    runs Postgres until the ops half lands. Local development and the test
+    suite's default stay on SQLite — a new developer needs no database
+    server; Postgres exists only in CI and, later, on the live server.
+  - Every migration and query from here on must pass the Postgres lane. The
+    differences that matter most: foreign keys (enforced by Postgres, never
+    on the production SQLite file, and enforced in the *test* engine so the
+    SQLite suite surfaces the same defects) and concurrent writers under
+    `READ COMMITTED` (today's process-level locks cover every known
+    check-then-act; ADR 2 owns this properly).
+  - The roadmap behind this: **ADR 2, shared state** (`RunRegistry`, the
+    dispatch and idempotency locks, the login throttle, the WebSocket tickets
+    out of the process — what multi-host actually costs) and **ADR 3, data
+    platform** (a read-only reporting role, row-level security on `org_id`,
+    JSONB). Postgres is a precondition for both, not a substitute.
+  - The per-user memory store and the vector knowledge-base files are not
+    covered: a Postgres deployment still needs file backups for them.

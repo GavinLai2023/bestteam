@@ -116,6 +116,8 @@ def _provision_user(db_path: str, username: str, password: str, *, org: str | No
     args = [sys.executable, "-c", _ADMIN_CLI_STDIN_SAFE, "create-user", username]
     args += ["--platform"] if platform else ["--org", org or "default"]
     env = {**os.environ, "BESTTEAM_DB_PATH": db_path}
+    # An ambient BESTTEAM_DATABASE_URL would win over the path above (see tests/conftest.py).
+    env.pop("BESTTEAM_DATABASE_URL", None)
     result = subprocess.run(
         args, cwd=str(REPO_ROOT), env=env, input=f"{password}\n{password}\n",
         capture_output=True, text=True, timeout=_IMPORT_HEAVY_TIMEOUT,
@@ -125,6 +127,7 @@ def _provision_user(db_path: str, username: str, password: str, *, org: str | No
 
 def _promote_to_admin(db_path: str, username: str) -> None:
     env = {**os.environ, "BESTTEAM_DB_PATH": db_path}
+    env.pop("BESTTEAM_DATABASE_URL", None)
     result = subprocess.run(
         [sys.executable, "-m", "ui.backend.admin", "promote", username],
         cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=_IMPORT_HEAVY_TIMEOUT,
@@ -218,6 +221,7 @@ def e2e_backend():
         "BESTTEAM_MEMORY_RERANK_MODEL": "",
         "BESTTEAM_EMAIL_BACKEND": "",
     }
+    env.pop("BESTTEAM_DATABASE_URL", None)
 
     npm = shutil.which("npm")
     assert npm is not None, "npm not found on PATH -- required to start the frontend dev server"
