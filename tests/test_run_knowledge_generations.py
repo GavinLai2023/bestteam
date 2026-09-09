@@ -2,6 +2,8 @@
 what keeps an old generation's rows alive while a trace still names them.
 See docs/superpowers/specs/2026-08-24-kb-generation-audit-retention-and-restore-design.md."""
 
+import logging
+
 import pytest
 
 pytestmark = pytest.mark.integration
@@ -183,3 +185,35 @@ def test_a_failed_reference_write_never_fails_the_run(file_engine, monkeypatch):
     assert registry.get(run.id).status == "completed"
     with session_factory(file_engine)() as db:
         assert db.query(RunKnowledgeGeneration).count() == 0
+
+
+def test_safe_record_skips_a_generation_pruned_before_the_event_landed(db, caplog):
+    """The pre-cutover item the Postgres lane surfaced: a KB search event can
+    reach the recorder after the generation it names was pruned. No reference
+    is written (on the SQLite file it would dangle; on Postgres the insert
+    would be refused), nothing is logged at WARNING, and the session is still
+    usable for the next reference."""
+    _, job1, job2 = _fixture(db)
+    pruned_id = job1.id
+    db.delete(job1)
+    db.commit()
+
+    with caplog.at_level(logging.INFO, logger="ui.backend.runtime"):
+        runtime._safe_record_knowledge_generation(db, run_id="r1", ingestion_job_id=pruned_id)
+
+    assert db.query(RunKnowledgeGeneration).count() == 0
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert any("pruned" in r.getMessage() for r in caplog.records)
+
+    runtime._safe_record_knowledge_generation(db, run_id="r1", ingestion_job_id=job2.id)
+    rows = db.query(RunKnowledgeGeneration).all()
+    assert [(r.run_id, r.ingestion_job_id) for r in rows] == [("r1", job2.id)]
+
+
+def test_safe_record_writes_the_reference_when_the_generation_exists(db):
+    _, job1, _ = _fixture(db)
+
+    runtime._safe_record_knowledge_generation(db, run_id="r1", ingestion_job_id=job1.id)
+
+    rows = db.query(RunKnowledgeGeneration).all()
+    assert [(r.run_id, r.ingestion_job_id) for r in rows] == [("r1", job1.id)]

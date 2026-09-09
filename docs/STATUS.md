@@ -2465,14 +2465,29 @@
   above) — deliberately not started; recorded so it is not discovered by a
   customer.
 - **Two pre-cutover items the Postgres lane surfaced but did not fix**
-  (2026-09-07, PR 2 of the database-engine-portability spec).
-  `runtime._safe_record_knowledge_generation` inserts
-  `run_knowledge_generations.ingestion_job_id` naming an already-pruned job —
-  the SQLite file accepts the stale pointer, Postgres refuses the insert and
-  the audit row is lost; and delete order is load-bearing everywhere
-  (`crud.py`, `knowledge_bases.py` delete children by hand because nothing
-  cascades) — how the team-delete defect in PR 2 happened. Both belong to the
-  ops half of the spec, before the cutover window. A third — `alembic/env.py`
+  (2026-09-07, PR 2 of the database-engine-portability spec) — **both
+  closed 2026-09-10** (`specs/2026-09-10-postgres-cutover-ops-design.md`
+  §4.4). The first: `runtime._safe_record_knowledge_generation` inserted
+  `run_knowledge_generations.ingestion_job_id` naming an already-pruned
+  job — the SQLite file accepted the stale pointer (an orphan
+  `check-orphans.sh` would report and `migrate-db` refuse on), Postgres
+  refused the insert with a WARNING traceback and a rollback. It now checks
+  that the job exists and logs at INFO when it does not; the `except` stays
+  for the race between the check and the insert. The second: delete order
+  is load-bearing everywhere (`crud.py`, `knowledge_bases.py` delete
+  children by hand because nothing cascades) — how the team-delete defect
+  in PR 2 happened. Verified rather than rewritten: every delete path has a
+  test that runs under `make_test_engine()`, which enforces keys and runs
+  on Postgres in the `backend-postgres` lane — skills/KB `crud.delete_item`
+  (`test_crud_api`, `test_builder_api`, `test_org_isolation`),
+  `delete_pipeline_config` (`test_crud_api`), the model catalog
+  (`test_model_catalog`), document removal (`test_org_knowledge_bases`),
+  `delete_knowledge_base` (`test_crud_api`, `test_org_knowledge_bases`),
+  generation pruning (`test_ingestion`, `test_crud_api`),
+  `retention.purge_run` (`test_retention`, `test_ingestion`), builder-session
+  deletion (`test_builder_api`), `clear-email` (`test_org_settings`),
+  `delete-user` (`test_admin_cli`, `test_memory_api`, `test_ws_stream`).
+  A third — `alembic/env.py`
   built its own engine without the UTC session pin, so `b7c8d9e0f1a2`'s
   default-organisation seed landed in the server's local time on a non-UTC
   Postgres — was fixed in PR 3 (2026-09-08) after a Codex review re-found

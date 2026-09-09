@@ -37,7 +37,7 @@ from .db.inbox_events import (
     complete_events,
     release_events,
 )
-from .db.models import InboxEvent, Run, TraceEventRecord
+from .db.models import InboxEvent, IngestionJob, Run, TraceEventRecord
 from .db.run_knowledge_generations import record as record_knowledge_generation
 from .db.usage import record_usage
 from .registry import RunRegistry
@@ -507,13 +507,21 @@ def _safe_record_knowledge_generation(db: Session, *, run_id: str, ingestion_job
     KB `tool_completed` can reach here well after the search happened. If two
     ingestions of that collection complete inside one agent node's buffering
     window, the referenced job may already have been pruned by the time this
-    call lands -- on the SQLite file (keys off) the row is inserted with the
-    stale pointer and is never removed except by deleting the KB; on Postgres
-    the insert is refused and swallowed here. Either way the run itself is
-    unaffected, and the only consequence is a dangling (or missing) reference
-    to a generation whose trace was already unresolvable by the time it was
-    pruned."""
+    call lands. A generation that is already gone gets no reference: on the
+    SQLite file (keys off) the insert would land with a dangling pointer --
+    exactly what `check-orphans.sh` reports and `migrate-db` refuses on --
+    and on Postgres it would be refused, logged below with a traceback and
+    rolled back. Either way the run itself is unaffected, and the only
+    consequence is a missing reference to a generation whose trace was
+    already unresolvable by the time it was pruned. The `except` stays for
+    the race between this check and the insert."""
     try:
+        if db.get(IngestionJob, ingestion_job_id) is None:
+            _logger.info(
+                "Knowledge generation %s was pruned before run %s's search event landed; no reference recorded",
+                ingestion_job_id, run_id,
+            )
+            return
         record_knowledge_generation(db, run_id, ingestion_job_id)
         db.commit()
     except Exception:  # noqa: BLE001 -- bookkeeping must never break a run
