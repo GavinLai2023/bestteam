@@ -989,9 +989,10 @@ Alembic 迁移不算：那走的是第 2 节里"每次启动自动迁移"那条�
    记忆库那份备份的放法完全一样——同样这三条命令，把路径换成
    `BESTTEAM_MEMORY_DB` 指向的那个文件——但必须放在文件压缩包解开**之后**，
    不能在之前。
-3. 重新启动后端：
+3. 把后端拉起来——用 `up -d` 而不是 `start`：容器是在你改 `.env` 之前建的，
+   `start` 只会原样拉起旧容器，环境变量还是旧的：
    ```bash
-   docker compose start backend
+   docker compose up -d backend
    ```
 4. 验证：`curl http://localhost:8000/api/health` 返回 `200`，并且用一个"备份
    之前就已经存在"的账号能正常登录。

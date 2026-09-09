@@ -299,7 +299,7 @@ def test_restore_script_follows_the_documented_procedure():
         "docker compose stop backend",
         "docker compose cp",
         "chown -R 1000:1000",
-        "docker compose start backend",
+        "docker compose up -d backend",
         "/api/health",
     ):
         assert step in restore, step

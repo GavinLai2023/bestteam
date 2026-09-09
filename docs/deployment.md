@@ -1136,6 +1136,9 @@ Postgres deployment would be read by nothing while "Restore complete"
 printed. On Postgres it restores into a fresh `bestteam_restore` and swaps
 it in only once `pg_restore` succeeded, so a failed restore leaves the live
 database untouched (the script says so and how to start the backend again).
+It brings the backend back with `docker compose up -d backend` rather than
+`start`, so a container created before an edit to `.env` is recreated with
+the configuration the probe read, not restarted against the other engine.
 
 It performs the steps below in order and finishes by waiting for
 `/api/health` to answer 200. **Rehearse it once before the first beta customer
@@ -1170,9 +1173,11 @@ then drop and rename — read the script):
    A memory database goes in exactly the same way — the same three commands
    against `BESTTEAM_MEMORY_DB`'s path — after any files archive has been
    unpacked, never before.
-3. Restart the backend:
+3. Bring the backend back -- `up -d`, not `start`: a container created
+   before an edit to `.env` still carries the old environment, and `start`
+   would bring it back pointed at the other engine:
    ```bash
-   docker compose start backend
+   docker compose up -d backend
    ```
 4. Verify: `curl http://localhost:8000/api/health` returns `200`, and a
    login with a known user from before the backup succeeds.

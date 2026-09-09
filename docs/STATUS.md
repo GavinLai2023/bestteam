@@ -16,8 +16,11 @@
   which engine it uses and dumps accordingly, naming the file `.db` or
   `.pgdump` after what it found, so the existing cron line survives the
   cutover; `restore.sh` identifies a backup by its bytes, refuses a
-  mismatch with the configured engine, and on Postgres restores into a
-  fresh database before swapping it in; `deploy.sh` follows the naming. The
+  mismatch with the configured engine, on Postgres restores into a fresh
+  database before swapping it in, and brings the backend back with
+  `up -d` so a container created before an edit to `.env` is recreated
+  rather than restarted against the other engine (Codex review);
+  `deploy.sh` follows the naming. The
   runbook (`docs/deployment.md` §3, "Moving to Postgres") gives each phase
   its expected output: deploy, cutover with rollback, the restore drill,
   and retiring the SQLite file after a 7-day window. A dry-run harness with

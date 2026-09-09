@@ -159,11 +159,16 @@ fi
 echo "Handing the data directory back to uid 1000..."
 docker compose run --rm --no-deps --user root backend chown -R 1000:1000 "$DATA_DIR"
 
-echo "Starting the backend..."
-docker compose start backend
+echo "Bringing the backend back..."
+# `up -d`, not `start`: the probe above read .env, and a container created
+# before an edit to .env still carries the old environment -- `start` would
+# bring back a backend pointed at the other engine and report this restore
+# complete. `up -d` recreates it when its configuration changed and starts it
+# otherwise, waiting for db's health check on the way.
+docker compose up -d backend
 
 echo "Waiting for /api/health..."
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do
   if curl -fsS http://localhost:8000/api/health > /dev/null 2>&1; then
     echo "Restore complete: the backend is healthy."
     echo "Now log in with a user that existed when the backup was taken."
@@ -171,5 +176,5 @@ for _ in $(seq 1 30); do
   fi
   sleep 2
 done
-echo "The backend has not answered /api/health within 60s -- check 'docker compose logs backend'." >&2
+echo "The backend has not answered /api/health within 120s -- check 'docker compose logs backend'." >&2
 exit 1
