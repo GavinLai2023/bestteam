@@ -6,6 +6,26 @@
 
 ## Done
 
+- **The ops half of the Postgres cutover: a `db` service, engine-following
+  backup/restore, and the runbook** (2026-09-10,
+  `specs/2026-09-10-postgres-cutover-ops-design.md`; brought forward from
+  the trigger in `DECISIONS.md`, amended there). `docker-compose.yml` gains
+  `postgres:16` as `db` (C collation like CI, no published port, 512 MB,
+  its own volume; `POSTGRES_PASSWORD` required by the file itself) and the
+  backend depends on its health. `backup-db.sh` asks the running backend
+  which engine it uses and dumps accordingly, naming the file `.db` or
+  `.pgdump` after what it found, so the existing cron line survives the
+  cutover; `restore.sh` identifies a backup by its bytes, refuses a
+  mismatch with the configured engine, and on Postgres restores into a
+  fresh database before swapping it in; `deploy.sh` follows the naming. The
+  runbook (`docs/deployment.md` §3, "Moving to Postgres") gives each phase
+  its expected output: deploy, cutover with rollback, the restore drill,
+  and retiring the SQLite file after a 7-day window. A dry-run harness with
+  a stubbed `docker` caught one defect before the VPS could: `$(...)` drops
+  trailing empty probe lines, so a line-by-line `read` hit EOF on a
+  Postgres deployment without memory. Not done here: off-site backups,
+  Postgres tuning/PITR, a Chinese runbook.
+
 - **`admin migrate-db` copies the deployment database into an empty one**
   (2026-09-08, PR 3 of 3 for
   `specs/2026-09-07-database-engine-portability-design.md`). Pre-flight
@@ -20,8 +40,7 @@
   table is in; Postgres sequences are reset; counts and primary keys are
   verified. Rehearsed on a copy of the development database into a local
   Postgres: 6,942 rows across 31 tables, 104 orphans handled. The code half
-  of the spec is complete; the ops half (provisioning, backup/restore,
-  runbook, cutover) waits for the trigger in `DECISIONS.md`.
+  of the spec is complete; the ops half shipped 2026-09-10 (entry above).
 
 - **The backend suite runs against Postgres on every backend PR, and the
   SQLite suite enforces foreign keys** (2026-09-07, PR 2 of 3 for
@@ -2482,7 +2501,8 @@
   `create_all`-built schema (`DROP TABLE pipelines` is refused while other
   tables reference it), so the chain must run on an empty database before
   the first backend boot. `migrate-db` and the container entrypoint already
-  order it that way; the runbook says so (2026-09-08).
+  order it that way; the runbook (`docs/deployment.md` §3, 2026-09-10)
+  orders it too and gives the reset for a target that was touched first.
 - **Horizontal scale-out of the email poller is blocked on in-process state,
   not on the poller or the engine.** The engine half is done (2026-09-07,
   PR 1 of `specs/2026-09-07-database-engine-portability-design.md`:

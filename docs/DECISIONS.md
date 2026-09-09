@@ -574,3 +574,29 @@ pricing agent with `observe` colleagues.
     JSONB). Postgres is a precondition for both, not a substitute.
   - The per-user memory store and the vector knowledge-base files are not
     covered: a Postgres deployment still needs file backups for them.
+- **Amended 2026-09-10 — the trigger was brought forward.** The beta VPS
+  was stable and idle: the three first customers had accounts but had not
+  started using the system, walkthroughs were being scheduled, and real
+  data was two to four weeks away. A cutover's cost rises with every row a
+  customer has written and was at its floor; the live file had just been
+  checked clean (`scripts/check-orphans.sh`, 2026-09-09). The owner chose
+  to do the whole ops half now and cut over before customer data lands
+  (`specs/2026-09-10-postgres-cutover-ops-design.md`). Three decisions in
+  that spec belong here so they are not re-opened:
+  - **Postgres runs in the compose stack on the same VPS**, not as a
+    managed instance: capacity allowed it (3.0 GiB available of 3.8, no
+    swap; 63 GB free), it is the version CI verifies, it adds no bill and
+    no vendor, and the failure domain stays "this box" — which it already
+    was. A managed database buys headroom 1–3 customers do not need, and
+    the memory store and KB files would still need the operator's own
+    backups.
+  - **The operator scripts follow the running backend's engine** rather
+    than being swapped at cutover: a window in which the wrong script runs
+    against the wrong engine is a nightly cron reporting success over a
+    backup of the wrong thing. `backup-db.sh` asks the container which
+    database it uses and names the file after the engine; `restore.sh`
+    identifies a backup by its content and refuses a mismatch.
+  - **No separate rehearsal database.** `migrate-db` never writes its
+    source and the target is disposable, so a failure on the day costs a
+    `DROP DATABASE`; the safety net that must be proven is the Postgres
+    backup/restore round trip, and that drill is part of the cutover day.
