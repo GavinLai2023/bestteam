@@ -330,6 +330,12 @@ and the copy refuses (recover by dropping and recreating it). The procedure
 around all this — provisioning, backups, the cutover window — is the ops half
 of the 2026-09-07 spec and is not written yet.
 
+Before that copy, `./scripts/check-orphans.sh` answers the one question
+`migrate-db` refuses on: read-only against the running deployment, it reports
+every row whose foreign key points at nothing, and says which of them
+`--fix-orphans` would write as NULL and which it would drop. It calls the same
+`orphan_report()` the copy's pre-flight calls, so the two cannot disagree.
+
 On Postgres the migration chain must run on the EMPTY database before the
 backend ever starts against it: the rename migration `o2p3q4r5s6t7` cannot
 replay over tables the backend's `create_all` has already built (Postgres
