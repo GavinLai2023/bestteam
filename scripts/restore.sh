@@ -6,25 +6,37 @@
 # order or with the chown forgotten.
 #
 # Usage:
-#   ./scripts/restore.sh <backup.db> [files.tgz] [memory.db]
+#   ./scripts/restore.sh <backup.db|backup.pgdump> [files.tgz] [memory.db]
+#
+# The backup is identified by its content -- a SQLite header or pg_dump's
+# `PGDMP` -- never by its name, and it must match the engine the backend is
+# configured for: a SQLite file copied into a Postgres deployment would be
+# read by nothing, and "Restore complete" would still print.
 #
 # What it does, in order:
-#   1. stops the backend so nothing writes during the restore;
-#   2. copies the database (and unpacks the files archive, if given) into the
-#      data volume, then puts back the per-user memory database if one was
-#      passed -- last, because the files archive carries its own raw-tar copy
-#      of that file and this one is the copy to trust;
-#   3. hands the restored files back to uid 1000 -- `docker cp` writes as root
-#      and the backend runs unprivileged, so it could otherwise read but not
-#      write (or migrate) them;
-#   4. starts the backend and waits for /api/health to answer 200.
+#   1. asks the backend image which database .env configures (a one-off
+#      container, BEFORE anything is stopped) and refuses a mismatch;
+#   2. stops the backend so nothing writes during the restore;
+#   3. SQLite: copies the file into the data volume (dropping the old file's
+#      WAL/journal siblings first). Postgres: restores into a fresh
+#      `<database>_restore` and, only once that succeeded, drops the live
+#      database and renames the new one into its place -- a failed
+#      pg_restore leaves the live database untouched;
+#   4. unpacks the files archive, if given, then puts back the per-user
+#      memory database if one was passed -- last, because the files archive
+#      carries its own raw-tar copy of that file and this one is the copy to
+#      trust;
+#   5. hands the restored files back to uid 1000 -- `docker cp` writes as
+#      root and the backend runs unprivileged, so it could otherwise read but
+#      not write (or migrate) them;
+#   6. starts the backend and waits for /api/health to answer 200.
 #
 # Remember: a database backup is useless for email without the
 # BESTTEAM_SECRETS_KEY that was in force when it was taken -- restore that
 # into .env separately (see docs/deployment.md).
 set -euo pipefail
 
-DB_BACKUP="${1:?usage: restore.sh <backup.db> [files.tgz] [memory.db]}"
+DB_BACKUP="${1:?usage: restore.sh <backup.db|backup.pgdump> [files.tgz] [memory.db]}"
 FILES_BACKUP="${2:-}"
 MEM_BACKUP="${3:-}"
 DATA_DIR=/app/ui/backend/data
@@ -37,31 +49,92 @@ if [ -n "$MEM_BACKUP" ] && [ ! -f "$MEM_BACKUP" ]; then
   echo "no such file: $MEM_BACKUP" >&2; exit 1
 fi
 
-# Where a memory database goes is whatever BESTTEAM_MEMORY_DB says, so ask the
-# image rather than assuming a filename -- and ask BEFORE stopping anything, so
-# an unset variable cannot leave the backend down with a half-done restore. A
-# one-off container reading the same .env the backend reads; `python` (not
-# `uvicorn`), so the entrypoint does not run migrations.
-MEM_PATH=""
-if [ -n "$MEM_BACKUP" ]; then
-  MEM_PATH=$(docker compose run --rm --no-deps backend \
-    python -c "import os; print(os.environ.get('BESTTEAM_MEMORY_DB', '').strip())" | tr -d '\r')
-  if [ -z "$MEM_PATH" ]; then
-    echo "BESTTEAM_MEMORY_DB is unset: nothing would ever read the restored memory database." >&2
-    echo "Set it in .env first (docs/deployment.md, \"Per-user memory\"), then re-run." >&2
-    exit 1
-  fi
+# What kind of backup is this? The first bytes say; the name may not.
+if [ "$(head -c 5 "$DB_BACKUP")" = "PGDMP" ]; then
+  FORMAT=postgresql
+elif [ "$(head -c 15 "$DB_BACKUP")" = "SQLite format 3" ]; then
+  FORMAT=sqlite
+else
+  echo "$DB_BACKUP is neither a SQLite database nor a pg_dump archive (not a backup-db.sh file)" >&2
+  exit 1
+fi
+
+# Which database does .env configure, and where does a memory database go?
+# Ask the image rather than assuming -- and ask BEFORE stopping anything, so a
+# mismatch cannot leave the backend down with a half-done restore. A one-off
+# container reading the same .env the backend reads; `python` (not `uvicorn`),
+# so the entrypoint does not run migrations. Six lines, never the password.
+PROBE=$(docker compose run --rm --no-deps backend python -c "
+import os
+from sqlalchemy.engine import make_url
+from ui.backend.db.database import resolve_database_url, sqlite_path_of
+raw = resolve_database_url(os.environ)
+url = make_url(raw)
+print(url.get_backend_name())
+print(url.host or '')
+print(url.username or '')
+print(url.database or '')
+print(sqlite_path_of(raw) or '')
+print(os.environ.get('BESTTEAM_MEMORY_DB', '').strip())
+" | tr -d '\r')
+# Command substitution drops trailing empty lines (a server database has no
+# SQLite path; memory may be unset), so index with defaults rather than
+# `read` line by line, which would hit EOF under `set -e`.
+mapfile -t PROBE_LINES <<< "$PROBE"
+ENGINE="${PROBE_LINES[0]:-}"; DB_HOST="${PROBE_LINES[1]:-}"; DB_USER="${PROBE_LINES[2]:-}"
+DB_NAME="${PROBE_LINES[3]:-}"; SQLITE_PATH="${PROBE_LINES[4]:-}"; MEM_PATH="${PROBE_LINES[5]:-}"
+
+if [ "$FORMAT" != "$ENGINE" ]; then
+  echo "$DB_BACKUP is a $FORMAT backup, but the backend is configured for $ENGINE" >&2
+  echo "(BESTTEAM_DATABASE_URL / BESTTEAM_DB_PATH in .env); nothing would read it after the restore." >&2
+  exit 1
+fi
+if [ "$ENGINE" = "postgresql" ] && [ "$DB_HOST" != "db" ]; then
+  echo "The backend uses postgresql host '$DB_HOST'; this script restores into the compose 'db' service only." >&2
+  exit 1
+fi
+if [ "$ENGINE" = "sqlite" ] && [ -z "$SQLITE_PATH" ]; then
+  echo "The backend is configured for an in-memory SQLite database; there is nothing to restore into." >&2
+  exit 1
+fi
+if [ -n "$MEM_BACKUP" ] && [ -z "$MEM_PATH" ]; then
+  echo "BESTTEAM_MEMORY_DB is unset: nothing would ever read the restored memory database." >&2
+  echo "Set it in .env first (docs/deployment.md, \"Per-user memory\"), then re-run." >&2
+  exit 1
 fi
 
 echo "Stopping the backend..."
 docker compose stop backend
 
-echo "Restoring the database from $DB_BACKUP..."
-# The database's WAL/journal siblings belong to the old file; left behind,
-# SQLite would replay them over the restored one.
-docker compose run --rm --no-deps --user root backend \
-  sh -c "rm -f $DATA_DIR/bestteam.db-wal $DATA_DIR/bestteam.db-shm $DATA_DIR/bestteam.db-journal"
-docker compose cp "$DB_BACKUP" "backend:$DATA_DIR/bestteam.db"
+if [ "$ENGINE" = "sqlite" ]; then
+  echo "Restoring the database from $DB_BACKUP into $SQLITE_PATH..."
+  # The database's WAL/journal siblings belong to the old file; left behind,
+  # SQLite would replay them over the restored one.
+  docker compose run --rm --no-deps --user root backend \
+    sh -c "rm -f $SQLITE_PATH-wal $SQLITE_PATH-shm $SQLITE_PATH-journal"
+  docker compose cp "$DB_BACKUP" "backend:$SQLITE_PATH"
+else
+  # Maintenance statements run from the `postgres` database, never from
+  # inside the one being dropped or renamed. POSTGRES_USER is a superuser in
+  # the official image, and the Unix socket inside the container needs no
+  # password.
+  psql_admin() {
+    docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U "$DB_USER" -d postgres "$@"
+  }
+  TMP_DB="${DB_NAME}_restore"
+  echo "Restoring the database from $DB_BACKUP into a fresh $TMP_DB..."
+  psql_admin -c "DROP DATABASE IF EXISTS \"$TMP_DB\" WITH (FORCE)" \
+             -c "CREATE DATABASE \"$TMP_DB\" OWNER \"$DB_USER\""
+  if ! docker compose exec -T db pg_restore -U "$DB_USER" -d "$TMP_DB" \
+         --no-owner --no-privileges --exit-on-error < "$DB_BACKUP"; then
+    echo "pg_restore failed; the live database $DB_NAME is untouched." >&2
+    echo "Start the backend again with 'docker compose start backend', fix the cause, then re-run." >&2
+    exit 1
+  fi
+  echo "Swapping $TMP_DB in as $DB_NAME..."
+  psql_admin -c "DROP DATABASE \"$DB_NAME\" WITH (FORCE)" \
+             -c "ALTER DATABASE \"$TMP_DB\" RENAME TO \"$DB_NAME\""
+fi
 
 if [ -n "$FILES_BACKUP" ]; then
   echo "Restoring data files from $FILES_BACKUP..."
