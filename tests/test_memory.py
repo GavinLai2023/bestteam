@@ -271,6 +271,20 @@ def test_recall_preamble_frames_memory_as_untrusted_reference():
     assert "not" in lowered and "instruction" in lowered
 
 
+def test_recall_preamble_marks_a_past_answer_as_unverified():
+    # Run fb0b6e3e: a team invented a WeChat official account, the answer was
+    # recorded as episodic/procedural memory, and the next run recalled it --
+    # where `NO_FABRICATION_GUARD` ("only state facts you were given ... in your
+    # background above") licensed repeating it as fact. A note records what was
+    # said, not that the thing it mentions exists.
+    store = _store()
+    store.add("alice", PROCEDURAL, "reply explained our official WeChat account")
+    preamble = MemoryManager(store).recall_preamble("alice", "WeChat account")
+
+    assert "records what was said in an earlier session" in preamble
+    assert "not a verified fact" in preamble
+
+
 def test_record_run_writes_only_episodic_without_model():
     store = _store()
     manager = MemoryManager(store)

@@ -2,7 +2,12 @@ import pytest
 
 from helpers import make_test_engine
 from ui.backend.db.database import init_db, session_factory
-from ui.backend.db.models import Organization, PipelineRecord, PipelineVersion
+from ui.backend.db.models import (
+    EmailTrigger,
+    Organization,
+    PipelineRecord,
+    PipelineVersion,
+)
 from ui.backend.db.pipelines import publish_pipeline_version, current_version_id
 
 pytestmark = pytest.mark.unit
@@ -55,6 +60,42 @@ def test_redeploy_by_pipeline_id_renames_head_in_place():
     assert record2.id == head_id
     assert record2.name == "new"
     assert v2.version_number == 2
+
+
+def test_renaming_a_head_carries_the_orgs_email_trigger_with_it():
+    """`email_triggers.pipeline_name` is a name-keyed reference, and a deploy
+    that renames the head left it pointing at the old name: the trigger stayed
+    enabled, resolved nothing, and the org's automatic email answering died
+    silently (org 11, 2026-09-05 -- 27 runs of a live team, then every poll
+    logging "No deployed team named ...". A rename is a redeploy, and a trigger
+    stays on across redeploys."""
+    db = _db()
+    record, _ = publish_pipeline_version(db, org_id=1, name="old", config={"v": 1})
+    db.add(EmailTrigger(org_id=1, pipeline_name="old", enabled=True))
+    db.commit()
+
+    publish_pipeline_version(
+        db, org_id=1, name="new", config={"v": 2}, pipeline_id=record.id
+    )
+    db.commit()
+
+    trigger = db.query(EmailTrigger).filter_by(org_id=1).one()
+    assert trigger.pipeline_name == "new"
+    assert trigger.enabled is True
+
+
+def test_renaming_a_head_leaves_a_trigger_naming_another_team_alone():
+    db = _db()
+    record, _ = publish_pipeline_version(db, org_id=1, name="old", config={"v": 1})
+    db.add(EmailTrigger(org_id=1, pipeline_name="mailer", enabled=True))
+    db.commit()
+
+    publish_pipeline_version(
+        db, org_id=1, name="new", config={"v": 2}, pipeline_id=record.id
+    )
+    db.commit()
+
+    assert db.query(EmailTrigger).filter_by(org_id=1).one().pipeline_name == "mailer"
 
 
 def test_stale_pipeline_id_falls_back_to_resolve_or_create_by_name():

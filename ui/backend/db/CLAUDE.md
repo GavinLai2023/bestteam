@@ -212,6 +212,13 @@ Deleting a KB cascades to all four tables (`delete_kb_ingestion_data`).
   disagreeing about which day it is. Unique `org_id` — at most one auto-running
   team per org.
 
+  ⚠️ **`pipeline_name` is a name-keyed reference with nothing else to resolve
+  by**, so `publish_pipeline_version` carries it along when a deploy renames the
+  head. Without that, a rename (an ordinary wizard edit) leaves the trigger
+  enabled and naming a team that no longer exists: every poll refuses to build
+  and the org's automatic email answering dies silently. A pause and a mailbox
+  change switch a trigger off; a redeploy never does.
+
 - **`inbox_events`** — the durable per-message ledger. Detection records one
   `pending` row per detected message **in the same commit that advances
   `last_uid`**; before this, the cursor advanced while the work existed only

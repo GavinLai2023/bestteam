@@ -6,6 +6,49 @@
 
 ## Done
 
+- **A rename now carries the org's email trigger with it** (2026-09-06). The
+  poller had been logging `cannot build pipeline 'AI_Email_Response_Team' for
+  org 11: No deployed team named ...` every cycle since 2026-09-05 06:24, and
+  that org's automatic email answering had been dead for the whole day with no
+  louder signal than a banner on the team's own page. `email_triggers.pipeline_name`
+  is a name-keyed reference with nothing else to resolve by, and
+  `publish_pipeline_version` renames a head in place whenever a builder session
+  carries its `pipeline_id` -- an ordinary wizard edit. Nothing updated the
+  trigger, so the rename left it enabled and naming a team that no longer
+  existed: every poll refused to build, released the mail penalty-free and went
+  round again. The deploy now moves a trigger that names *this* head (only this
+  one -- the org has a single trigger and it may hold another team's automatic
+  runs), which is what the surrounding design already promised: a pause and a
+  mailbox change switch a trigger off, a redeploy never does.
+
+  **What renamed it was the canned-team incident below.** Head 7 was the
+  customer's `AI_Email_Response_Team` through three versions and 27 runs; the
+  09-05 redeploy of its original wizard session (`3ab45fcd4882`, "I want to
+  build a AI team to help me to read my coming email") went through the
+  silently-defaulted `fake-architect:` model and published `e2e_support_team`
+  and its single canned `support_agent` over the top. So one dev-box catalog
+  wipe cost a live team its config *and* its automation. Repairing that org is
+  a data decision, not a code one: version 3 still holds the real config.
+
+- **Recalled memory no longer launders a team's own inventions into fact**
+  (2026-09-06). The day the anti-fabrication guard shipped, the same customer
+  asked the same nutrition team the same question and was told again to search
+  for "our official WeChat account". The guard was working: both specialists
+  answered that they had no such information, and the manager even opened with
+  "sorry, I have no details". It was not inventing anything — it was repeating
+  itself. The *earlier*, pre-guard run's fabricated answer had been recorded as
+  episodic and procedural memory, and at recall time those two rows were the
+  only memories this user had. Recall presents them as "background reference",
+  and `NO_FABRICATION_GUARD` counts "your background above" as a legitimate
+  source of facts, so the two texts between them licensed the repeat — and the
+  repeat was recorded in turn. The preamble now says what those note types are:
+  an `(episodic)` or `(procedural)` note records what was said in an earlier
+  session, not a verified fact, and on its own is never evidence that a
+  channel, account, price or policy exists. **Still a constraint, not a
+  guarantee** — a team that must answer "how do I reach you" needs a knowledge
+  base holding the real channels plus `grounding_policy: refuse`. Memory rows
+  already written stay polluted; purging them is an admin action.
+
 - **The ops half of the Postgres cutover: a `db` service, engine-following
   backup/restore, and the runbook** (2026-09-10,
   `specs/2026-09-10-postgres-cutover-ops-design.md`; brought forward from

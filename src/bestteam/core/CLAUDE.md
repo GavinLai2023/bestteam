@@ -439,6 +439,13 @@ Provenance is stamped into `metadata={run_id, pipeline_version_id}`.
 `extra_system_prompt`, so the cached compiled graph is reused with no recompile)
 and record afterward. Both default None → unchanged behaviour.
 
+⚠️ The preamble frames recalled notes **two** ways and both are load-bearing:
+untrusted data (they may carry injected instructions), **and** a record of what
+was said rather than verified fact. A run's own answer is stored as
+episodic/procedural, so without the second framing an invented fact returns the
+next run as "background" — exactly what `NO_FABRICATION_GUARD` licenses
+repeating.
+
 ### Known limitations
 
 - **Dedup and consolidation.** Extraction dedups **exact** semantic/procedural
