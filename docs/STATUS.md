@@ -6,6 +6,19 @@
 
 ## Done
 
+- **`check-env` warns when a memory model spec carries no `provider:`
+  prefix** (2026-09-10). `BESTTEAM_MEMORY_MODEL` and
+  `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` land verbatim in
+  `usage_records.model`, which `db/usage.py` matches against
+  `model_catalog.spec` exactly. Drop the prefix and langchain still infers
+  the provider from the model name, so the calls work and nothing is
+  logged -- but no catalogue row matches the bare name, so those tokens are
+  priced at nothing and vanish from every cost figure, the monthly email
+  budget included. Seen on beta: `BESTTEAM_MEMORY_MODEL=deepseek-v4-flash`
+  metered 10 unpriced calls before anyone noticed the second row in Trace's
+  "By model" tab. A WARN and never a FAIL -- the deployment works either
+  way -- and reported only when set, since memory is opt-in.
+
 - **A rename now carries the org's email trigger with it** (2026-09-06). The
   poller had been logging `cannot build pipeline 'AI_Email_Response_Team' for
   org 11: No deployed team named ...` every cycle since 2026-09-05 06:24, and
