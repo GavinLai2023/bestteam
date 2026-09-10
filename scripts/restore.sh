@@ -128,7 +128,7 @@ else
   if ! docker compose exec -T db pg_restore -U "$DB_USER" -d "$TMP_DB" \
          --no-owner --no-privileges --exit-on-error < "$DB_BACKUP"; then
     echo "pg_restore failed; the live database $DB_NAME is untouched." >&2
-    echo "Start the backend again with 'docker compose start backend', fix the cause, then re-run." >&2
+    echo "Bring the backend back with 'docker compose up -d backend', fix the cause, then re-run." >&2
     exit 1
   fi
   echo "Swapping $TMP_DB in as $DB_NAME..."
