@@ -319,6 +319,14 @@ docker compose run --rm --no-deps backend alembic upgrade head
 docker compose up -d
 ```
 
+### 迁移到 Postgres
+
+`docker-compose.yml` 自带一个 Postgres 16 服务（`db`）。把一套部署从 SQLite
+文件迁到它上面，是一次「复制」而不是「迁移」：`admin migrate-db` 只读地打开
+SQLite 文件，在空库上跑完迁移链，逐表复制并核对行数和主键。完整的操作步骤
+（部署、切换、回滚、恢复演练、退役 SQLite 文件）以及每一步应该看到的输出，见
+英文版 `docs/deployment.md` 第 3 节「Moving to Postgres」。
+
 ## 4. 建组织、建账号（用命令行工具）
 
 这套系统**没有对外开放的注册功能**——不管是界面上还是接口上都没有。组织和账号
@@ -875,6 +883,11 @@ curl -sS -i -X POST "https://$HOST/api/$PROJ/store/" \
 ./scripts/backup-files.sh /path/to/backups/bestteam-files-2026-06-17.tgz
 ```
 
+迁到 Postgres 之后这两条命令不用改：`backup-db.sh` 会问正在运行的后端用的是
+哪个库，SQLite 走在线备份接口，Postgres 走 `pg_dump`，并按实际引擎给文件定
+后缀（`.db` 或 `.pgdump`）；`restore.sh` 按文件内容识别备份类型，和后端配置
+的引擎对不上会直接拒绝。
+
 这两个脚本之所以分开，是因为它们要处理的东西性质不一样：一个**正在被使用**
 的数据库，必须通过 SQLite 专门提供的备份接口来复制（如果直接原样拷贝文件，
 可能会拷到一个"写到一半"的数据页，导致备份文件本身是坏的）；而上传文件这一
@@ -976,9 +989,10 @@ Alembic 迁移不算：那走的是第 2 节里"每次启动自动迁移"那条�
    记忆库那份备份的放法完全一样——同样这三条命令，把路径换成
    `BESTTEAM_MEMORY_DB` 指向的那个文件——但必须放在文件压缩包解开**之后**，
    不能在之前。
-3. 重新启动后端：
+3. 把后端拉起来——用 `up -d` 而不是 `start`：容器是在你改 `.env` 之前建的，
+   `start` 只会原样拉起旧容器，环境变量还是旧的：
    ```bash
-   docker compose start backend
+   docker compose up -d backend
    ```
 4. 验证：`curl http://localhost:8000/api/health` 返回 `200`，并且用一个"备份
    之前就已经存在"的账号能正常登录。

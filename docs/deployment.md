@@ -160,15 +160,16 @@ Edit `.env` and fill in:
   sales-demo instance.
 - **Database engine.** By default the backend uses a SQLite file on the data
   volume (`ui/backend/data/bestteam.db`, or `BESTTEAM_DB_PATH`). Setting
-  `BESTTEAM_DATABASE_URL` (for example
-  `postgresql+psycopg://user:password@host:5432/bestteam`) selects a server
-  database instead; the URL wins when both are set, and Alembic, the operator
-  CLI and `check-env` all follow the same setting. **SQLite is the supported
-  production engine today.** Postgres support is code-complete and verified
-  in CI on every change, but it is not yet operated in production — the
-  runbook, backup and cutover procedure for it come with the ops half of
-  `docs/superpowers/specs/2026-09-07-database-engine-portability-design.md`.
-  `check-env` prints which database it resolved to (`[OK] database: ...`).
+  `BESTTEAM_DATABASE_URL` selects a server database instead; the URL wins
+  when both are set, and Alembic, the operator CLI, `check-env` and the
+  backup/restore scripts all follow the same setting. `docker-compose.yml`
+  ships a Postgres 16 service, `db`, for exactly this: its URL is
+  `postgresql+psycopg://bestteam:<POSTGRES_PASSWORD>@db:5432/bestteam`, and
+  `POSTGRES_PASSWORD` (`openssl rand -hex 24`) must be in `.env` before the
+  stack starts. Both engines are supported in production. A deployment
+  starts on SQLite and moves to Postgres with the procedure in section 3
+  ("Moving to Postgres"); `check-env` prints which database it resolved to
+  (`[OK] database: ...`).
 
 TLS termination (HTTPS/WSS) is assumed to be handled by a reverse proxy or
 the hosting platform's load balancer in front of these containers.
@@ -257,6 +258,17 @@ What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
   `docker compose run backend python -m ui.backend.admin ...` runs as given, so
   the recovery commands in section 3 are never gated on the migration they
   recover from).
+- **A Postgres 16 server runs beside the backend** (`db`, `postgres:16` --
+  the version CI tests against -- with C collation like SQLite's byte
+  order). It publishes no port: only the compose network reaches it, as host
+  `db`. It is capped at 512 MB and keeps its data in the `bestteam_pg`
+  volume. It receives only its own three variables, never `.env`;
+  `POSTGRES_PASSWORD` is interpolated from `.env` the way `VITE_*` is below,
+  and the compose file refuses to parse without it. That value is read once,
+  when the volume is initialised -- changing it later does not change the
+  role's password. The backend waits for the server's health check before
+  starting, but only *uses* it once `BESTTEAM_DATABASE_URL` names it
+  (section 3).
 - **Container logs are rotated** (json-file, 5 x 20 MB backend, 3 x 10 MB
   frontend); see "Logs and error reporting" below for where to look and what
   is reported.
@@ -267,7 +279,8 @@ What the containers do for you (all in `Dockerfile` / `docker-compose.yml`):
   interview recording (up to 200 MB) has to fit through whatever fronts it.
 
 `docker compose` automatically loads `.env` from the project root to
-substitute `${VITE_API_BASE}`/`${VITE_WS_BASE}` in `docker-compose.yml` (this
+substitute `${POSTGRES_PASSWORD}` and `${VITE_API_BASE}`/`${VITE_WS_BASE}` in
+`docker-compose.yml` (this
 is separate from the backend's `env_file: .env`), so the values you set in
 step 1 are baked into the frontend image at build time.
 
@@ -318,30 +331,160 @@ docker compose run --rm --no-deps backend alembic upgrade head
 docker compose up -d
 ```
 
-### Moving to a server database
+### Moving to Postgres
 
 Moving to a server database is not a migration but a copy: `admin migrate-db
---to <url>` (see the ADMIN_GUIDE). **Stop the application first** — the copy is
-a point-in-time snapshot of the source, and a source still being written to
-fails verification rather than copying silently. Provision the target as an
-empty database and let `migrate-db` run the migration chain on it; do **not**
-start the stack against it first, or the rows the chain seeds make it non-empty
-and the copy refuses (recover by dropping and recreating it). The procedure
-around all this — provisioning, backups, the cutover window — is the ops half
-of the 2026-09-07 spec and is not written yet.
+--to <url>` (see the ADMIN_GUIDE) opens the SQLite file read-only, runs the
+migration chain on the EMPTY target, copies every row in dependency order and
+verifies row counts and primary keys. The procedure below is written for the
+compose `db` service and for an idle deployment (design:
+`docs/superpowers/specs/2026-09-10-postgres-cutover-ops-design.md`); every
+step names the output that proves it. Two rules it is built around:
 
-Before that copy, `./scripts/check-orphans.sh` answers the one question
+- **The target must be empty and must never have been started against.**
+  `migrate-db` runs the chain itself. A backend booted against the empty
+  server first would seed rows — and on Postgres the rename migration
+  `o2p3q4r5s6t7` cannot replay over tables `create_all` has already built
+  (`DROP TABLE pipelines` is refused while other tables reference it) — and
+  the copy would refuse with "the target already holds rows". The reset is
+  below.
+- **The source must be stopped.** The copy is a point-in-time snapshot; a
+  source still being written to fails verification rather than copying
+  silently.
+
+Before any of it, `./scripts/check-orphans.sh` answers the one question
 `migrate-db` refuses on: read-only against the running deployment, it reports
 every row whose foreign key points at nothing, and says which of them
 `--fix-orphans` would write as NULL and which it would drop. It calls the same
 `orphan_report()` the copy's pre-flight calls, so the two cannot disagree.
 
-On Postgres the migration chain must run on the EMPTY database before the
-backend ever starts against it: the rename migration `o2p3q4r5s6t7` cannot
-replay over tables the backend's `create_all` has already built (Postgres
-refuses its `DROP TABLE pipelines` while other tables reference it).
-`migrate-db` and the container entrypoint both do this; a hand-provisioned
-server must too.
+**Phase 1 — deploy the release that ships `db`.** `./scripts/deploy.sh`. Its
+step 3 shows `POSTGRES_PASSWORD` as new in `.env.example`: add it to `.env`
+with a value from `openssl rand -hex 24` (hex only, so the same value pastes
+into the URL later) and leave `BESTTEAM_DATABASE_URL` empty. Step 5 creates
+the server, waits for its health check and recreates the backend, which
+stays on SQLite. Then:
+
+```bash
+docker compose ps                                   # db: healthy; backend: healthy
+docker compose exec -T backend python -m ui.backend.admin check-env
+#   [OK] database: sqlite file /app/ui/backend/data/bestteam.db
+docker compose exec -T db psql -U bestteam -d bestteam -c "show lc_collate"    # C
+```
+
+**Phase 2 — the cutover.** Any quiet hour; on an idle deployment there is
+nothing to announce.
+
+```bash
+cd /opt/bestteam
+./scripts/check-orphans.sh                          # clean: every foreign key points at a row that exists
+./scripts/backup-db.sh    /var/backups/bestteam/pre-cutover-$(date +%F)              # the last SQLite backup
+./scripts/backup-files.sh /var/backups/bestteam/pre-cutover-files-$(date +%F).tgz
+
+docker compose stop backend                         # nothing may write during the copy
+
+PW=$(grep -E '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)
+docker compose run --rm --no-deps -e BESTTEAM_DATABASE_URL= backend \
+  python -m ui.backend.admin migrate-db --to "postgresql+psycopg://bestteam:${PW}@db:5432/bestteam"
+```
+
+`-e BESTTEAM_DATABASE_URL=` pins the copy's *source* to the SQLite file
+whatever `.env` says, and the shell history keeps `${PW}` unexpanded.
+Expected, in this order: `source: sqlite file /app/ui/backend/data/bestteam.db`,
+`target: postgresql host db database bestteam`, `alembic upgrade head on the
+target`, the rows the chain seeded being deleted, `copying rows` with one
+line per table, `verified: every table's row count and primary keys match
+the source`, a note that memory and files are not copied, exit 0. A
+`[FAIL] migrate-db: ...` line is a refusal with its reason and nothing has
+changed on either side. A copy that failed part-way leaves the target
+partially populated — reset it and rerun:
+
+```bash
+docker compose exec -T db psql -U bestteam -d postgres \
+  -c 'DROP DATABASE bestteam WITH (FORCE)' -c 'CREATE DATABASE bestteam OWNER bestteam'
+```
+
+Then switch the backend over: one line in `.env`, set exactly once, and a
+*recreate* — a `start` would not re-read the file:
+
+```bash
+URL="postgresql+psycopg://bestteam:${PW}@db:5432/bestteam"
+if grep -q '^BESTTEAM_DATABASE_URL=' .env; then
+  sed -i "s#^BESTTEAM_DATABASE_URL=.*#BESTTEAM_DATABASE_URL=${URL}#" .env
+else
+  echo "BESTTEAM_DATABASE_URL=${URL}" >> .env
+fi
+grep -c '^BESTTEAM_DATABASE_URL=postgresql' .env    # 1
+docker compose up -d backend
+```
+
+The entrypoint's `alembic upgrade head` finds the target already at head.
+Verify, in this order:
+
+```bash
+docker compose exec -T backend python -m ui.backend.admin check-env
+#   [OK] database: postgresql host db database bestteam
+#   ... schema: at head ...
+curl -fsS http://localhost:8000/api/health                                   # {"status":"ok","database":"ok"}
+docker compose exec -T backend python -m ui.backend.admin check-health && echo OK   # the poller now polls Postgres
+./scripts/check-orphans.sh                          # database: postgresql host db database bestteam / clean
+docker compose logs --since 15m backend | grep -c -i traceback               # 0
+```
+
+and in the browser: log in, open the Activity page (the copied history is
+there), run the team you use for walkthroughs and open its trace.
+
+**Rollback**, at any point in phase 2: blank the URL and recreate. The
+SQLite file is exactly as it was — the copy opened it read-only and nothing
+has written to it since `stop`. Reset the Postgres database (above) before
+trying again.
+
+```bash
+sed -i 's#^BESTTEAM_DATABASE_URL=.*#BESTTEAM_DATABASE_URL=#' .env
+docker compose up -d backend
+```
+
+**Phase 3 — prove the safety net, the same day.** The nightly cron line
+needs no edit: `backup-db.sh` follows the engine and now writes `.pgdump`
+("Backup and restore" below). Take one by hand and restore it, the drill
+from `docs/PRELAUNCH_DRILLS_RUNBOOK.md` §3 with the new file:
+
+```bash
+./scripts/backup-db.sh /var/backups/bestteam/post-cutover-$(date +%F)
+#   Backed up postgresql database bestteam (compose service db) to .../post-cutover-<date>.pgdump
+docker compose exec -T backend python -m ui.backend.admin create-org afterbackup --display-name "After Backup"
+docker compose exec -T backend python -m ui.backend.admin list-orgs        # afterbackup is listed
+./scripts/restore.sh /var/backups/bestteam/post-cutover-$(date +%F).pgdump
+#   ... Restore complete: the backend is healthy.
+docker compose exec -T backend python -m ui.backend.admin list-orgs        # afterbackup is gone
+```
+
+`afterbackup` disappearing is the proof the restore replaced the database
+rather than reporting success over the old one. The next morning,
+`ls /var/backups/bestteam/` holds `bestteam-<date>.pgdump` and
+`/var/log/bestteam-backup.log` ends with `Backed up postgresql database
+bestteam`.
+
+**Phase 4 — close the window.** Keep the SQLite file on the volume for
+seven days or until the first customer writes real data, whichever comes
+first; until then the rollback above loses nothing but what the idle poller
+wrote. After that a rollback would lose Postgres-side writes, so retire the
+file: one last copy through SQLite's backup API, then remove it and its
+siblings.
+
+```bash
+docker compose exec -T backend python -c "
+import sqlite3
+src = sqlite3.connect('/app/ui/backend/data/bestteam.db')
+dst = sqlite3.connect('/tmp/retired.db'); src.backup(dst); dst.close(); src.close()"
+docker compose cp backend:/tmp/retired.db /var/backups/bestteam/retired-sqlite-$(date +%F).db
+docker compose exec -T backend rm -f /tmp/retired.db
+docker compose run --rm --no-deps --user root backend sh -c \
+  'cd /app/ui/backend/data && rm -f bestteam.db bestteam.db-wal bestteam.db-shm bestteam.db-journal'
+```
+
+From then on the way back is an ordinary restore of a SQLite backup into a
+deployment configured for SQLite, not a flip.
 
 ## 4. Provision orgs and users (operator CLI)
 
@@ -708,7 +851,7 @@ is actually on the box:
 
 ```bash
 cd /opt/bestteam
-./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F).db
+./scripts/backup-db.sh /var/backups/bestteam/pre-upgrade-$(date +%F)   # .db or .pgdump, after the engine
 
 git status                               # what has this host modified?
 git stash && git pull && git stash pop   # keeps local edits, e.g. a port binding
@@ -802,6 +945,12 @@ mounted at `/app/ui/backend/data` in the backend container, and survives
   separate from `bestteam.db`, which `backup-db.sh` takes as a second file
   (see below).
 
+A deployment moved to Postgres (section 3) keeps the database in a second
+named volume, `bestteam_pg`, mounted in the `db` container. Nothing on it
+is ever copied as files -- `backup-db.sh` dumps it with `pg_dump` -- and the
+data volume above then holds no `bestteam.db` (the file is retired at the
+end of the cutover) but everything else unchanged.
+
 ## Logs and error reporting
 
 **Where the logs are.** Both containers log to stdout, which Docker keeps as
@@ -887,24 +1036,39 @@ A backup is **two files** (three where per-user memory is enabled), taken by
 two scripts, both safe to run while the backend is running:
 
 ```bash
-./scripts/backup-db.sh       # the database, via SQLite's online backup API
+./scripts/backup-db.sh       # the database, whichever engine the backend uses
 ./scripts/backup-files.sh    # everything else on the data volume, as a .tgz
 # or with explicit paths:
-./scripts/backup-db.sh    /path/to/backups/bestteam-2026-06-17.db
+./scripts/backup-db.sh    /path/to/backups/bestteam-2026-06-17          # becomes .db or .pgdump
 ./scripts/backup-files.sh /path/to/backups/bestteam-files-2026-06-17.tgz
 ```
 
-They are separate on purpose: a database in use must be copied through
-SQLite's backup API (a raw copy can catch a half-written page), while the
-uploads directory is ordinary files for which `tar` is exactly right — so
-`backup-files.sh` excludes `bestteam.db` and its `-wal`/`-shm` siblings, and
-`backup-db.sh` never looks at anything else. The database alone restores a
-working deployment; the files archive restores the original documents behind
-each knowledge base (see "Data persistence" above for what lives where).
+**`backup-db.sh` follows the running backend.** It asks the container which
+database it uses and backs that up: a SQLite file through SQLite's online
+backup API (a raw copy can catch a half-written page); the compose `db`
+service through `pg_dump --format=custom`, streamed straight to the host (a
+consistent snapshot — the server keeps serving). It names the file after the
+engine: the path you give it, minus any `.db`/`.pgdump`, is a stem, and the
+output is `<stem>.db` or `<stem>.pgdump`, so a file's name always says what
+is inside, and a cron line written with `.db` keeps working after a move to
+Postgres and simply starts producing `.pgdump` files. It refuses a Postgres
+backend that is not the compose `db` service — it dumps by exec-ing into that
+container, and anything else would be the wrong server reported as a
+success. Its last line names the engine and the file.
+
+The two scripts are separate on purpose: a database in use must be copied
+through its engine's own snapshot mechanism, while the uploads directory is
+ordinary files for which `tar` is exactly right — so `backup-files.sh`
+excludes `bestteam.db` and its `-wal`/`-shm` siblings, and `backup-db.sh`
+never looks at anything else (a Postgres deployment's data lives in the
+`bestteam_pg` volume, which `backup-files.sh` never sees). The database alone
+restores a working deployment; the files archive restores the original
+documents behind each knowledge base (see "Data persistence" above for what
+lives where).
 
 **Per-user memory rides along with `backup-db.sh`** — it is a second, separate
-SQLite database and gets the same online-backup treatment, written beside the
-main file as `<output-path>-memory.db`. The script asks the *running container*
+SQLite database whichever engine the deployment uses, and gets the same
+online-backup treatment, written beside the main file as `<stem>-memory.db`. The script asks the *running container*
 for `BESTTEAM_MEMORY_DB` (a `.env` edit never applied with a recreate is not
 what the backend is using), so there is nothing extra to add to the cron entry:
 a deployment with memory off, or with it on but nothing written yet, just says
@@ -965,6 +1129,17 @@ it lands is `BESTTEAM_MEMORY_DB` as `.env` currently sets it — the script read
 that before it stops anything, and refuses up front if the variable is unset,
 rather than restoring a database no running backend would ever open.
 
+**`restore.sh` identifies the backup by its content** — a SQLite header or
+`pg_dump`'s `PGDMP` — never by its name, and refuses one that does not match
+the engine the backend is configured for: a SQLite file copied into a
+Postgres deployment would be read by nothing while "Restore complete"
+printed. On Postgres it restores into a fresh `bestteam_restore` and swaps
+it in only once `pg_restore` succeeded, so a failed restore leaves the live
+database untouched (the script says so and how to start the backend again).
+It brings the backend back with `docker compose up -d backend` rather than
+`start`, so a container created before an edit to `.env` is recreated with
+the configuration the probe read, not restarted against the other engine.
+
 It performs the steps below in order and finishes by waiting for
 `/api/health` to answer 200. **Rehearse it once before the first beta customer
 is on the box** — against a throwaway `docker compose` stack, not production —
@@ -974,7 +1149,9 @@ does not need a fresh rehearsal by default: re-run it only if
 `docker-compose.yml` changed since your last rehearsal. A new Alembic
 migration alone is already exercised by the normal auto-migrate-on-start path
 (section 2), not by the restore procedure itself. The manual
-equivalent, if you would rather see each step:
+equivalent for a SQLite deployment, if you would rather see each step (on
+Postgres the script's own steps are `pg_restore` into `bestteam_restore`,
+then drop and rename — read the script):
 
 1. Stop the backend so nothing writes to the database during restore:
    ```bash
@@ -996,9 +1173,11 @@ equivalent, if you would rather see each step:
    A memory database goes in exactly the same way — the same three commands
    against `BESTTEAM_MEMORY_DB`'s path — after any files archive has been
    unpacked, never before.
-3. Restart the backend:
+3. Bring the backend back -- `up -d`, not `start`: a container created
+   before an edit to `.env` still carries the old environment, and `start`
+   would bring it back pointed at the other engine:
    ```bash
-   docker compose start backend
+   docker compose up -d backend
    ```
 4. Verify: `curl http://localhost:8000/api/health` returns `200`, and a
    login with a known user from before the backup succeeds.

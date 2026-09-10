@@ -9,8 +9,8 @@
 #   ./scripts/deploy.sh [backup-dir]        # default /var/backups/bestteam
 #
 # What it does, in order:
-#   1. backs the database up to <backup-dir>/pre-upgrade-<timestamp>.db
-#      (scripts/backup-db.sh, SQLite's online backup API);
+#   1. backs the database up to <backup-dir>/pre-upgrade-<timestamp>.db or
+#      .pgdump (scripts/backup-db.sh follows the running backend's engine);
 #   2. pulls: a clean tree is a plain `git pull`; host-local edits (a port
 #      binding, say) are stashed around it and put back -- if they no longer
 #      apply, the script stops there, with the old containers still serving;
@@ -29,9 +29,16 @@ set -euo pipefail
 BACKUP_DIR="${1:-/var/backups/bestteam}"
 cd "$(dirname "$0")/.."
 
-BACKUP="$BACKUP_DIR/pre-upgrade-$(date +%F-%H%M%S).db"
-echo "1/5 Backing up the database to $BACKUP..."
-./scripts/backup-db.sh "$BACKUP"
+STEM="$BACKUP_DIR/pre-upgrade-$(date +%F-%H%M%S)"
+echo "1/5 Backing up the database to $STEM.db (SQLite) or $STEM.pgdump (Postgres)..."
+./scripts/backup-db.sh "$STEM"
+# backup-db.sh names the file after the engine it found; the rollback line
+# printed below must name the one that exists.
+BACKUP=""
+for candidate in "$STEM.db" "$STEM.pgdump"; do
+  if [ -f "$candidate" ]; then BACKUP="$candidate"; fi
+done
+[ -n "$BACKUP" ] || { echo "backup-db.sh wrote neither $STEM.db nor $STEM.pgdump" >&2; exit 1; }
 
 echo "2/5 Pulling..."
 BEFORE=$(git rev-parse HEAD)

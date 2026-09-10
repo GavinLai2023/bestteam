@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
@@ -204,13 +205,27 @@ def test_entrypoint_migrates_only_when_starting_the_server():
 
 def test_compose_restarts_and_bounds_the_services():
     compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-    assert compose.count("restart: unless-stopped") == 2
+    assert compose.count("restart: unless-stopped") == 3
     assert "memory: 2g" in compose
-    assert compose.count("max-size:") == 2
+    assert compose.count("max-size:") == 3
     # The backend image declares a HEALTHCHECK; the frontend should wait on it
     # rather than on the container merely having started, so an operator who
     # opens port 80 right after `up -d` finds a backend that answers.
     assert "condition: service_healthy" in compose
+    # The database server: the CI lane's image and collation (so what the
+    # Postgres lane verifies holds on the real server), reachable only on the
+    # compose network, bounded like the others, and impossible to start
+    # without a password -- `:?` makes compose refuse the whole file.
+    services = yaml.safe_load(compose)["services"]
+    db = services["db"]
+    assert db["image"] == "postgres:16"
+    assert "ports" not in db
+    assert db["environment"]["POSTGRES_INITDB_ARGS"] == "--locale=C --encoding=UTF8"
+    ci = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert 'POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"' in ci
+    assert db["environment"]["POSTGRES_PASSWORD"].startswith("${POSTGRES_PASSWORD:?")
+    assert db["deploy"]["resources"]["limits"]["memory"] == "512m"
+    assert services["backend"]["depends_on"]["db"]["condition"] == "service_healthy"
 
 
 def test_backup_covers_the_data_volume_not_only_the_database():
@@ -252,6 +267,29 @@ def test_backup_db_also_takes_the_per_user_memory_database():
     assert "-memory.db" in doc
 
 
+def test_backup_db_follows_the_running_backends_engine():
+    # The script asks the running container which database it uses and names
+    # the file after what it found, so a cron line written for SQLite keeps
+    # working after the move to Postgres and a file's name never lies.
+    db = (_ROOT / "scripts" / "backup-db.sh").read_text(encoding="utf-8")
+    assert "resolve_database_url" in db
+    assert 'OUT_PATH="$STEM.db"' in db
+    assert 'OUT_PATH="$STEM.pgdump"' in db
+    assert "pg_dump" in db and "--format=custom" in db
+    # It dumps by exec-ing into the compose `db` service; any other host would
+    # be the wrong server reported as a success.
+    assert '"$DB_HOST" != "db"' in db
+    # A failed dump must not leave a partial archive behind as if it were one.
+    assert 'rm -f "$OUT_PATH"' in db
+    # deploy.sh passes a stem and looks for whichever file was produced, so
+    # the rollback line it prints names a file that exists.
+    deploy = (_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    assert '"$STEM.db" "$STEM.pgdump"' in deploy
+    doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
+    assert ".pgdump" in doc
+    assert "Moving to Postgres" in doc
+
+
 def test_restore_script_follows_the_documented_procedure():
     restore = (_ROOT / "scripts" / "restore.sh").read_text(encoding="utf-8")
     assert "\r" not in restore
@@ -261,7 +299,7 @@ def test_restore_script_follows_the_documented_procedure():
         "docker compose stop backend",
         "docker compose cp",
         "chown -R 1000:1000",
-        "docker compose start backend",
+        "docker compose up -d backend",
         "/api/health",
     ):
         assert step in restore, step
@@ -277,7 +315,18 @@ def test_restore_script_follows_the_documented_procedure():
     # archive, whose raw-tar copy of the same file it exists to overwrite.
     assert "[memory.db]" in restore
     assert "BESTTEAM_MEMORY_DB" in restore
-    assert restore.index("MEM_PATH=$(") < restore.index("docker compose stop backend")
+    # One probe answers both "which engine" and "where does memory go", and it
+    # runs before the stop.
+    assert restore.index("PROBE=$(") < restore.index("docker compose stop backend")
     assert restore.index('cp "$FILES_BACKUP"') < restore.index('cp "$MEM_BACKUP"')
+    # A backup is identified by its bytes, never its name, and one that does
+    # not match the configured engine is refused BEFORE anything is stopped:
+    # a SQLite file copied into a Postgres deployment is read by nothing.
+    assert restore.index('"PGDMP"') < restore.index("docker compose stop backend")
+    assert restore.index('"$FORMAT" != "$ENGINE"') < restore.index("docker compose stop backend")
+    # On Postgres the archive lands in a fresh <database>_restore; the live
+    # database is dropped only after pg_restore succeeded.
+    assert "_restore" in restore
+    assert restore.index("pg_restore") < restore.index('DROP DATABASE \\"$DB_NAME\\"')
     doc = (_ROOT / "docs" / "deployment.md").read_text(encoding="utf-8")
     assert "restore.sh" in doc

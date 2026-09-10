@@ -16,8 +16,10 @@ else `BESTTEAM_DB_PATH` → `sqlite:///…`, default `ui/backend/data/bestteam.d
 `readonly_engine(url)` (a SQLite file via `mode=ro`, so a check can never
 create it). `ui/backend/db_session.py` wires the per-deployment engine, the
 `get_db()` dependency and `LOCK_ANCHOR` (what the single-instance lock is keyed
-on). **sqlite and postgresql are the two supported engines**; Postgres is
-CI-verified, not yet operated — `docs/DECISIONS.md`.
+on). **sqlite and postgresql are the two supported engines**; production moves
+to the compose `db` service (Postgres 16) with `docs/deployment.md` §3, and the
+backup/restore scripts follow whichever engine the backend uses —
+`docs/DECISIONS.md`.
 
 - `":memory:"` uses a `StaticPool` so all connections share one database —
   needed for tests and dry runs.

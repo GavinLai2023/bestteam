@@ -145,7 +145,7 @@ docker compose run --rm --no-deps backend python -m uvicorn ui.backend.main:app 
 
 ```bash
 mkdir -p /tmp/drill-backup
-./scripts/backup-db.sh    /tmp/drill-backup/bestteam.db
+./scripts/backup-db.sh    /tmp/drill-backup/bestteam   # 生成 bestteam.db（SQLite）或 bestteam.pgdump（Postgres）
 ./scripts/backup-files.sh /tmp/drill-backup/bestteam-files.tgz
 ls -la /tmp/drill-backup/
 ```
@@ -169,12 +169,13 @@ docker compose exec backend python -m ui.backend.admin list-orgs
 ### 3.4 执行恢复
 
 ```bash
+# Postgres 部署下把 bestteam.db 换成 bestteam.pgdump——以 3.2 里 ls 看到的文件名为准
 ./scripts/restore.sh /tmp/drill-backup/bestteam.db /tmp/drill-backup/bestteam-files.tgz
 ```
 
 这个脚本会自己完成「停止 backend → 清理旧的 WAL/journal 文件 → 拷贝备份进去 → 解压文件归档 → 把文件所有权交还给容器用户 → 启动 backend → 等待健康检查」全部步骤，最后会打印 `Restore complete: the backend is healthy.`。
 
-**如果它没有在 60 秒内等到健康检查通过**，会打印错误提示你去看 `docker compose logs backend`——这种情况下不要慌，先看日志找原因（常见原因：备份文件路径错了、磁盘空间不够），修好后可以重新跑一次 `restore.sh`。
+**如果它没有在 120 秒内等到健康检查通过**，会打印错误提示你去看 `docker compose logs backend`——这种情况下不要慌，先看日志找原因（常见原因：备份文件路径错了、磁盘空间不够），修好后可以重新跑一次 `restore.sh`。
 
 ### 3.5 核对恢复结果
 

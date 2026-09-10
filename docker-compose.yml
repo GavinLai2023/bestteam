@@ -2,6 +2,11 @@ services:
   backend:
     build: .
     env_file: .env
+    # Wait for the server's health check before starting. The backend only
+    # USES it once BESTTEAM_DATABASE_URL names it (docs/deployment.md, 3).
+    depends_on:
+      db:
+        condition: service_healthy
     # An unattended poller: come back after a crash or a host reboot, but stay
     # down after an explicit `docker compose stop`.
     restart: unless-stopped
@@ -22,6 +27,47 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  db:
+    # The version the CI lane tests against. No `ports:` -- only the compose
+    # network reaches it, as host `db`. It gets its own three variables and
+    # never `.env`, which would hand every backend secret to the database.
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bestteam
+      POSTGRES_DB: bestteam
+      # Interpolated from .env like the frontend's VITE_* below. `:?` makes
+      # compose refuse to parse the file without it -- deploy.sh then stops at
+      # its step 4, before anything is rebuilt -- rather than let the image
+      # initialise a server with no password. Read once, when the volume is
+      # initialised; changing it later does not change the role's password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # C collation, like SQLite's byte order and the CI lane: the
+      # order-sensitive endpoints the suite verifies there behave the same
+      # on this server.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    volumes:
+      - bestteam_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bestteam -d bestteam"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # The official image's documented floor; Docker's default /dev/shm is 64m.
+    shm_size: 128m
+    # Enough for this data volume (Postgres sits at one or two hundred MB
+    # resident); with the backend's 2g the limits stay inside a 4 GB host
+    # that has no swap.
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   frontend:
     build:
@@ -46,3 +92,4 @@ services:
 
 volumes:
   bestteam_data:
+  bestteam_pg:

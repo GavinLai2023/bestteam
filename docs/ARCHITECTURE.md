@@ -48,7 +48,7 @@ graph TB
 | Core abstractions | `langchain-core`, Pydantic v2 | `langchain-core` supplies model specs, tools, and `with_structured_output`; Pydantic v2 backs the `AgentSpec`/`TeamSpec`/`Specification`/`Requirements` schemas. |
 | CLI | Typer + Rich | Ergonomic command definitions with good terminal output for `init`/`run`/`graph`. |
 | Backend | FastAPI + Uvicorn + WebSocket | REST endpoints plus a streaming channel for live agent trace events to the dashboard. |
-| Persistence | SQLAlchemy 2.0 + SQLite (Postgres by `BESTTEAM_DATABASE_URL`, CI-verified, not yet operated) | One file-based DB per deployment by default, no separate database server. Org-scoped multi-tenancy (row-level `org_id`) lets the same code serve a single-customer instance (one org) or a shared platform (many). |
+| Persistence | SQLAlchemy 2.0; SQLite by default, Postgres 16 by `BESTTEAM_DATABASE_URL` (the compose `db` service) | A single-file database needs no server; a deployment moves to Postgres with `admin migrate-db` (`docs/deployment.md` §3). Org-scoped multi-tenancy (row-level `org_id`) lets the same code serve a single-customer instance (one org) or a shared platform (many). |
 | Default knowledge base | `rank-bm25` | Zero-API-key keyword search; good enough for the common case (a handful to a couple dozen documents). |
 | Optional vector knowledge base | `numpy` + an embeddings model | Semantic search (e.g. "refund" matching "money back") when keyword search isn't enough. A `hybrid` type fuses both with Reciprocal Rank Fusion — see `KNOWLEDGE_BASES.md`. |
 | Frontend | React 19 + TypeScript + `react-router-dom` 7 + Vite | SPA for the customer surfaces (dashboard, Team Builder wizard, run monitor) and the admin surfaces. |
