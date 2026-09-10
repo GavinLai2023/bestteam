@@ -176,6 +176,27 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
         else:
             ok("BESTTEAM_KB_DEFAULT_RERANK_MODEL", rerank)
 
+    # Both of these land verbatim in `usage_records.model`, which `db/usage.py`
+    # matches against `model_catalog.spec` exactly. Drop the `provider:` prefix
+    # and langchain still guesses the provider from the model name, so the
+    # calls work and nothing is logged -- but no catalog entry matches the bare
+    # name, so those tokens are priced at nothing and vanish from every cost
+    # figure, the monthly email budget included. Seen on beta:
+    # BESTTEAM_MEMORY_MODEL=deepseek-v4-flash metered 10 unpriced calls before
+    # anyone noticed the second row in Trace's "By model" tab. Reported only
+    # when set: memory is opt-in and off by default.
+    for name in ("BESTTEAM_MEMORY_MODEL", "BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL"):
+        spec = _get(env, name)
+        if not spec:
+            continue
+        if ":" in spec:
+            ok(name, spec)
+        else:
+            warn(name, f"{spec!r} has no `provider:` prefix. The calls still work (langchain "
+                 "infers the provider from the model name), but no model_catalog entry matches "
+                 "the bare name, so their tokens are silently never priced and are missing from "
+                 f"every cost total. Use the catalog's own spec string, e.g. deepseek:{spec}")
+
     # `web_search` fails at run time, not at start-up: the tool raises, the
     # adapter turns the exception into tool-result text, and the model is free
     # to answer from its own weights instead. The customer gets a research

@@ -126,6 +126,29 @@ def test_an_unset_rerank_default_warns_only_once_semantic_search_is_on():
     assert not has_failures(check_environment(env))
 
 
+@pytest.mark.parametrize(
+    "name", ["BESTTEAM_MEMORY_MODEL", "BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL"]
+)
+def test_a_memory_model_without_a_provider_prefix_warns_that_its_tokens_go_unpriced(name):
+    env = dict(_GOOD, **{name: "deepseek-v4-flash"})
+    finding = _by_name(check_environment(env))[name]
+    assert finding.level == "WARN"
+    assert "deepseek:deepseek-v4-flash" in finding.message
+    # The deployment works either way, so this must never block a launch.
+    assert not has_failures(check_environment(env))
+    prefixed = dict(_GOOD, **{name: "deepseek:deepseek-v4-flash"})
+    assert _by_name(check_environment(prefixed))[name].level == "OK"
+
+
+def test_the_memory_model_specs_are_not_reported_when_memory_is_off():
+    # Memory is opt-in and off by default; an unset optional model spec is not
+    # a finding at all, or every deployment without memory carries two lines
+    # about a feature it does not use.
+    by = _by_name(check_environment(_GOOD))
+    assert "BESTTEAM_MEMORY_MODEL" not in by
+    assert "BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL" not in by
+
+
 def test_a_malformed_sentry_dsn_fails_because_the_backend_would_not_start():
     pytest.importorskip("sentry_sdk")
     for dsn in ("garbage", "https://o.ingest.sentry.io/1", "https://k@o.ingest.sentry.io/"):
