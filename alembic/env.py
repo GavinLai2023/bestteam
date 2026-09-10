@@ -23,9 +23,14 @@ if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", resolve_database_url(os.environ).replace("%", "%%"))
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# This line sets up loggers basically. `disable_existing_loggers=False`: the
+# default silently disables every logger that already exists -- every
+# application logger, when the chain is replayed in-process (the migration
+# tests, `migrate-db`'s upgrade_target) -- so a `caplog` test later in the
+# same process captured nothing. The entrypoint's own `alembic` process has
+# no such loggers; nothing changes there.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
