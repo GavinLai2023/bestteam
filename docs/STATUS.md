@@ -26,7 +26,7 @@
   Incremental ingestion matches on the sha256 of a file's **raw bytes**, which
   is blind to a change in the code that turns bytes into text, so re-uploading
   the same seven files would have carried the old coordinate-heavy chunks
-  forward forever. `IngestionJob.parser_revision` (migration `s6t7u8v9w0x1`,
+  forward forever. `IngestionJob.parser_revision` (migration `b5c6d7e8f9g0`,
   nullable, no backfill) records which generation of the parser and chunker cut
   a job's chunks and `_carryable` requires a match — the first upload after
   this upgrade re-cuts once, every one after that is incremental again.
