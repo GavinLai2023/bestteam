@@ -934,6 +934,73 @@ def test_a_changed_chunk_size_re_chunks_everything(db, engine, tmp_path):
     assert all(len(c.text) <= 100 for c in chunks)
 
 
+def test_a_changed_parser_revision_re_chunks_everything(db, engine, tmp_path, monkeypatch):
+    """A document's chunks depend on the *code* that cut them, not only on the
+    parameters. When the parser or the chunker changes what a file renders to
+    -- dropping BPMN diagram geometry, say -- an unchanged file has to be
+    re-cut, or the improvement silently never reaches an existing collection:
+    the bytes are identical, so the content hash matches and the stale chunks
+    are carried forward forever."""
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+    assert first.parser_revision == ingestion._PARSER_REVISION
+
+    monkeypatch.setattr(ingestion, "_PARSER_REVISION", ingestion._PARSER_REVISION + 1)
+
+    calls = []
+    original = ingestion.embed_documents_in_batches
+
+    def counting(embeddings, texts):
+        calls.append(list(texts))
+        return original(embeddings, texts)
+
+    monkeypatch.setattr(ingestion, "embed_documents_in_batches", counting)
+    second = _make_job(db, kb, version="v_2")
+    job = _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+               kb_type="vector", embedding_model="fake:4")
+
+    assert job.status == "completed"
+    # Byte-identical file, same chunk parameters, same model -- and still
+    # re-embedded, because the code that produces the text has moved.
+    assert calls == [["Refunds within 30 days."]]
+    assert job.parser_revision == ingestion._PARSER_REVISION
+
+
+def test_an_unknown_parser_revision_is_not_reusable(db, engine, tmp_path):
+    """A job written before this column existed cannot say what cut its
+    chunks, so it is treated the way a NULL `chunk_size` already is: the first
+    upload after the upgrade re-cuts once, every one after that is
+    incremental."""
+    kb = _make_kb(db, name="vec_kb")
+    files = {"a.txt": "Refunds within 30 days."}
+    first = _make_job(db, kb, version="v_1")
+    _run(db, engine, first, kb, _version(tmp_path, "v_1", files),
+         kb_type="vector", embedding_model="fake:4")
+    first.parser_revision = None
+    db.commit()
+
+    calls = []
+    original = ingestion.embed_documents_in_batches
+
+    def counting(embeddings, texts):
+        calls.append(list(texts))
+        return original(embeddings, texts)
+
+    ingestion.embed_documents_in_batches = counting
+    try:
+        second = _make_job(db, kb, version="v_2")
+        job = _run(db, engine, second, kb, _version(tmp_path, "v_2", files),
+                   kb_type="vector", embedding_model="fake:4")
+    finally:
+        ingestion.embed_documents_in_batches = original
+
+    assert job.status == "completed"
+    assert calls == [["Refunds within 30 days."]]
+
+
 def test_a_changed_embedding_model_re_embeds_everything(db, engine, tmp_path):
     kb = _make_kb(db, name="vec_kb")
     files = {"a.txt": "Refunds within 30 days."}
@@ -1027,6 +1094,7 @@ def _completed_generation(db, kb, tmp_path, version, filename="doc.txt", embeddi
     job = IngestionJob(
         kb_id=kb.id, org_id=1, version=version, status="completed", file_count=1,
         kb_type="local_folder", chunk_size=1000, chunk_overlap=100,
+        parser_revision=ingestion._PARSER_REVISION,
     )
     db.add(job)
     db.flush()

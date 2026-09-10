@@ -176,6 +176,14 @@ class IngestionJob(Base):
     # as "not reusable" (`ingestion._carryable`).
     chunk_size: Mapped[Optional[int]] = mapped_column(nullable=True)
     chunk_overlap: Mapped[Optional[int]] = mapped_column(nullable=True)
+    # The same question one step further out: the parameters say how the
+    # chunker was called, this says which chunker it was. A parser change
+    # alters what a byte-identical file renders to, and the content hash --
+    # taken over the raw bytes -- cannot see that, so without this an
+    # improvement to parsing or chunking would never reach a collection
+    # that was already ingested. Bumped by hand: see
+    # `ingestion._PARSER_REVISION`.
+    parser_revision: Mapped[Optional[int]] = mapped_column(nullable=True)
     status: Mapped[str] = mapped_column(default="queued")
     file_count: Mapped[int] = mapped_column(default=0)
     documents_succeeded: Mapped[int] = mapped_column(default=0)

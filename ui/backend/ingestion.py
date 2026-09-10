@@ -122,6 +122,9 @@ def run_ingestion_job(
         job.embedding_model = embedding_model
         job.chunk_size = chunk_size
         job.chunk_overlap = chunk_overlap
+        # Not an argument like the four above: this one is a property of
+        # the code doing the work, so only the worker can report it.
+        job.parser_revision = _PARSER_REVISION
         db.commit()
 
         reusable = _reusable_documents(db, kb_id, job)
@@ -340,6 +343,26 @@ def run_ingestion_job(
         db.close()
 
 
+# Which generation of the text-production pipeline cut a job's chunks.
+#
+# **Bump this whenever a change to `bestteam.tools.file_parser` or to
+# `bestteam.core.knowledge_base`'s chunkers alters the text a document
+# produces.** Incremental ingestion keys on the raw bytes' content hash, which
+# is blind to a code change, so without a bump an existing collection keeps
+# chunks cut by the old code forever -- the customer re-uploads the same files
+# and nothing happens.
+#
+# An integer bumped by hand rather than a hash of those modules' source: a
+# hash would also fire on a comment or a rename, and every false bump re-embeds
+# a whole collection at the customer's expense.
+#
+# 1 -- the original chunkers.
+# 2 -- 2026-08-23: the XML renderer drops the OMG diagram-interchange
+#      namespaces (BPMN/DMN layout geometry), which were 48% of an exported
+#      process diagram.
+_PARSER_REVISION = 2
+
+
 def _reusable_documents(
     db: Session, kb_id: int, job: IngestionJob
 ) -> Dict[Tuple[str, str], List[KnowledgeChunk]]:
@@ -417,12 +440,17 @@ def _carryable(previous: IngestionJob, job: IngestionJob) -> bool:
     other with nothing saying so, and reusing a vector from another embedding
     model would put two incomparable spaces in one index.
 
-    `chunk_size is None` is every job written before the column existed, and
-    is deliberately not reusable -- the first upload after an upgrade
-    re-embeds once, and every one after that is incremental.
+    `parser_revision` answers the same question about the code rather than
+    the parameters: a byte-identical file re-parsed by a newer parser is
+    not the same text, and the content hash cannot see that.
+
+    A `None` in either column is every job written before that column
+    existed, and is deliberately not reusable -- the first upload after an
+    upgrade re-embeds once, and every one after that is incremental.
     """
     return (
         previous.chunk_size is not None
+        and previous.parser_revision == _PARSER_REVISION
         and previous.kb_type == job.kb_type
         and previous.embedding_model == job.embedding_model
         and previous.chunk_size == job.chunk_size

@@ -147,3 +147,23 @@ still in the system prompt, so the worst case is a manager that answers directly
 instead of delegating. `core/_structured_output.py` handles the identical refusal
 on the structured-output path; the two are the same provider behaviour met in two
 places.
+
+⚠️ The refusal is a property of the **model**, not the agent. `_first_call`
+records the spec in the module-level `_FORCED_TOOL_CHOICE_REFUSED` and every
+later agent behind that spec skips the probe — a manager plus two specialists
+otherwise spent three rejected calls a turn. Process-local and never persisted
+on purpose (a restart re-probes rather than pinning a stale answer), and the
+adapter's one piece of cross-run mutable state, so `tests/conftest.py` resets
+it per test.
+
+⚠️ **A manager's delegations in one turn run concurrently.** `_run_agent`'s
+tool loop puts a batch through a `ThreadPoolExecutor` when every call in it is
+a delegation and there is more than one, so the turn costs the longest
+delegation rather than their sum; `pool.map` yields in submission order, so
+each `ToolMessage` still matches the call it answers. Only delegations qualify
+— an arbitrary tool can have side effects whose interleaving nobody asked for,
+and the email toolkit talks to one IMAP connection — so a single call, or a
+batch mixing delegations with other tools, keeps the serial path. Safe because
+a tool's reporting box is a `ContextVar` scoped to its own call
+(`core/tool_context.py`) and the trace/usage sinks only append; a stop is
+checked before dispatch and again inside each subordinate's own run.

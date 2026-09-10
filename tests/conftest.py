@@ -136,3 +136,15 @@ def pytest_sessionfinish(session, exitstatus):
     if _postgres.enabled():
         _postgres.drop_created()
         _postgres.drop_template()
+
+
+# Same reasoning as the limiter above: `_FORCED_TOOL_CHOICE_REFUSED` remembers,
+# for the process, that a model rejected a forced `tool_choice`. One test that
+# exercises that refusal would otherwise silently disable the forcing for every
+# later test behind the same model spec -- and the fakes share a spec, since a
+# `BaseChatModel` instance has no name of its own and falls back to its class.
+@_pytest.fixture(autouse=True)
+def _fresh_forced_tool_choice_memo(monkeypatch):
+    from bestteam.adapters import langgraph_adapter
+
+    monkeypatch.setattr(langgraph_adapter, "_FORCED_TOOL_CHOICE_REFUSED", set())

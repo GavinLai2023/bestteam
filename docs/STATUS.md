@@ -6,6 +6,59 @@
 
 ## Done
 
+- **XML ingestion drops BPMN/DMN diagram geometry, and a parser change now
+  invalidates carried-forward chunks** (2026-08-23). The `eb_and_awards`
+  collection is seven exported process diagrams; **48% of what the renderer
+  produced from them was layout** — `bpmndi:BPMNShape`/`BPMNEdge`,
+  `dc:Bounds`, `di:waypoint`. Checked element by element, those namespaces
+  held no text whatsoever: only coordinates, sizes and internal ids. Indexed,
+  they buried the process they decorate — thousands of near-identical boxes of
+  numbers that every real query had to outrank, which is the likeliest reason
+  the live `awards_specialist` burned all five of its tool iterations on
+  eleven searches. `_render_xml_tree` now skips any element in the three OMG
+  diagram-interchange namespaces, **matched by URI, not by prefix** (`dc` is
+  Dublin Core's too, and a prefix is the author's choice), leaving one
+  `[diagram layout omitted]` line per outermost layout element rather than a
+  silent drop — `parse_file` is a general-purpose tool. Measured on the real
+  files: 3,662,859 → 1,891,954 characters, of which the omission markers are
+  336.
+  The second half is what makes that reach an existing collection at all.
+  Incremental ingestion matches on the sha256 of a file's **raw bytes**, which
+  is blind to a change in the code that turns bytes into text, so re-uploading
+  the same seven files would have carried the old coordinate-heavy chunks
+  forward forever. `IngestionJob.parser_revision` (migration `b5c6d7e8f9g0`,
+  nullable, no backfill) records which generation of the parser and chunker cut
+  a job's chunks and `_carryable` requires a match — the first upload after
+  this upgrade re-cuts once, every one after that is incremental again.
+  `ingestion._PARSER_REVISION` is a hand-bumped integer, not a hash of the two
+  modules' source: a hash would also fire on a comment or a rename, and every
+  false bump re-embeds a whole collection at the customer's expense.
+  Not done here, and worth revisiting: `bpmn:incoming`/`bpmn:outgoing` are a
+  further 11% of pure id cross-references, and every chunk still repeats a
+  ~250-character XML ancestor prefix that is identical across thousands of
+  them.
+
+- **A manager's delegations in one turn now run concurrently** (2026-08-23).
+  A shared-chat question to the deployed `Payroll Q&A` team took 146s. Its
+  trace (`c730b4c5`) put 124s of that in two delegations the manager had asked
+  for in a *single* turn — `delegate_to_agreements_specialist` at 47.3s then
+  `delegate_to_awards_specialist` at 76.9s — because `_run_agent`'s tool loop
+  executed a batch with a plain `for call in tool_calls`. The batch now goes
+  through a `ThreadPoolExecutor` when every call in it is a delegation and
+  there is more than one, so the turn costs the longest delegation instead of
+  their sum. `pool.map` yields in submission order, so a `ToolMessage` still
+  matches the call it answers. Deliberately narrow: a mixed batch, or a single
+  call, keeps the serial path, because an arbitrary tool can have side effects
+  whose interleaving nobody asked for (the email toolkit talks to one IMAP
+  connection) while a delegation only runs a subordinate's own turn. The
+  per-call body was extracted unchanged into `_execute_call` so both paths
+  share one implementation. No cap on the pool: a team's specialist count is
+  small and author-controlled, so a provider rate-limit rail would be
+  speculative — revisit if a wide team ever hits one.
+  The same trace also showed what is *not* slow: 21 knowledge-base searches
+  cost about 0.5s in total, so retrieval was never the bottleneck; the rest is
+  model latency (9,493 output tokens, thinking tokens included).
+
 - **`check-env` warns when a memory model spec carries no `provider:`
   prefix** (2026-09-10). `BESTTEAM_MEMORY_MODEL` and
   `BESTTEAM_MEMORY_QUERY_EXPANSION_MODEL` land verbatim in
@@ -528,6 +581,11 @@
   answers directly rather than a run with no answer at all. The retry is keyed
   on the provider's wording so an unrelated failure still surfaces, and a
   rejected request bills nothing, so the fallback costs one call, not two.
+  **The refusal is now remembered per model spec for the life of the process**
+  (`_FORCED_TOOL_CHOICE_REFUSED`), so the probe happens once rather than once
+  per agent — the live Payroll team was spending three rejected calls, and
+  roughly 0.8s, on every turn. Not persisted: a provider that starts
+  supporting the forcing is picked up on the next restart.
   Not a share-chat bug: the same team failed identically from Run a team and
   from automation.
 
