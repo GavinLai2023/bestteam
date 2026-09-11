@@ -133,7 +133,13 @@ def test_a_memory_model_without_a_provider_prefix_warns_that_its_tokens_go_unpri
     env = dict(_GOOD, **{name: "deepseek-v4-flash"})
     finding = _by_name(check_environment(env))[name]
     assert finding.level == "WARN"
-    assert "deepseek:deepseek-v4-flash" in finding.message
+    assert "deepseek-v4-flash" in finding.message
+    # It must not hand back the operator's own value with a prefix invented for
+    # it: the provider does not follow from the model name, and this checklist
+    # runs before the database is open, so it cannot look the real entry up.
+    # A guessed spec matches no catalog row either, and reads like one that does.
+    assert "deepseek:deepseek-v4-flash" not in finding.message
+    assert "model_catalog" in finding.message
     # The deployment works either way, so this must never block a launch.
     assert not has_failures(check_environment(env))
     prefixed = dict(_GOOD, **{name: "deepseek:deepseek-v4-flash"})

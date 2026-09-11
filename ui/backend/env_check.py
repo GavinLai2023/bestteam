@@ -192,10 +192,19 @@ def check_environment(env: Mapping[str, str]) -> List[Finding]:
         if ":" in spec:
             ok(name, spec)
         else:
+            # The suggestion deliberately does not prefix the operator's own
+            # value: the provider is not derivable from the model name (a bare
+            # `gemini-3.7-flash` is not `deepseek:gemini-3.7-flash`), and this
+            # checklist runs before the database is opened, so it cannot read
+            # the catalog to name the entry that is actually there. Naming a
+            # spec it has not verified would only trade one unpriced string
+            # for another.
             warn(name, f"{spec!r} has no `provider:` prefix. The calls still work (langchain "
                  "infers the provider from the model name), but no model_catalog entry matches "
                  "the bare name, so their tokens are silently never priced and are missing from "
-                 f"every cost total. Use the catalog's own spec string, e.g. deepseek:{spec}")
+                 "every cost total. Copy the spec of the catalog entry you mean, verbatim and "
+                 "prefix included (`openai:...`, `deepseek:...`) -- the match is exact, so a "
+                 "guessed prefix goes unpriced exactly like the bare name does.")
 
     # `web_search` fails at run time, not at start-up: the tool raises, the
     # adapter turns the exception into tool-result text, and the model is free
