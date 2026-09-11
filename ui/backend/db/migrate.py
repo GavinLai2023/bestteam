@@ -47,9 +47,10 @@ def _pk_of(table: Table, record: dict):
 def orphan_report(engine: Engine) -> List[Orphan]:
     """Every foreign key in the schema with child rows whose parent is missing.
 
-    `inbox_events.run_id` and `email_triggers.last_run_id` are loose pointers,
-    deliberately not foreign keys (migration `z3a4b5c6d7e8`), so they are
-    never scanned here.
+    `inbox_events.run_id`, `email_triggers.last_run_id` (migration
+    `z3a4b5c6d7e8`) and `usage_records.ingestion_job_id` (`c6d7e8f9g0h1`) are
+    loose pointers, deliberately not foreign keys, so they are never scanned
+    here.
     """
     out: List[Orphan] = []
     with engine.connect() as conn:

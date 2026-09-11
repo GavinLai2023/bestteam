@@ -435,11 +435,14 @@ no ordering race.
   naturally; the monthly `SUM(cost_estimate) WHERE org_id` deliberately includes
   them.
 
-  ⚠️ **`ingestion_job_id` is a provenance label, not a joinable key.** Both
-  generation pruning and KB deletion delete job rows, and the usage row survives
-  them **on purpose** — the same "keep the accounting" rule a retention purge
-  follows: an org's spend history must not change retroactively because it
-  deleted a knowledge base.
+  ⚠️ **`ingestion_job_id` is a provenance label, not a joinable key — and not a
+  foreign key** (migration `c6d7e8f9g0h1`, the same loose-pointer treatment as
+  `inbox_events.run_id`). Both generation pruning and KB deletion delete job
+  rows, and the usage row survives them **on purpose** — the same "keep the
+  accounting" rule a retention purge follows: an org's spend history must not
+  change retroactively because it deleted a knowledge base. Declared as a key,
+  Postgres refused both deletes from the first billed upload on (the prune
+  failed silently on every later upload; the KB delete was a 500).
 
 ## Alerting and retention settings
 
