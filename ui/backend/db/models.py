@@ -794,7 +794,7 @@ class UsageRecord(Base):
     (`ingestion_job_id` set, `agent="kb:ingest"`); or neither, for an ad-hoc
     `agent="kb:search"` row -- one test search from the "Try a search" panel
     (`org_knowledge_bases.py`), which belongs to no run and no upload, so
-    both FKs are NULL. A KB's query-time spend *inside a run* is a normal run
+    both are NULL. A KB's query-time spend *inside a run* is a normal run
     row -- it rides the calling agent's `agent_completed.usage` (see
     `core/tool_context.py`).
     """
@@ -805,13 +805,13 @@ class UsageRecord(Base):
     run_id: Mapped[Optional[str]] = mapped_column(ForeignKey("runs.id"), nullable=True)
     # Set instead of `run_id` for knowledge-base ingestion spend (migration
     # `n1o2p3q4r5s6`), so a row can be traced back to the upload that caused
-    # it. The id can outlive its job -- generation pruning and KB deletion
-    # both delete `knowledge_ingestion_jobs` rows, and this row deliberately
-    # survives them (same "keep the accounting" rule retention follows), so
-    # treat it as a provenance label, not a joinable key.
-    ingestion_job_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("knowledge_ingestion_jobs.id"), nullable=True
-    )
+    # it. A loose pointer, deliberately NOT a foreign key (migration
+    # `c6d7e8f9g0h1`, like `inbox_events.run_id`): generation pruning and KB
+    # deletion both delete `knowledge_ingestion_jobs` rows, and this row
+    # deliberately survives them (same "keep the accounting" rule retention
+    # follows). Declared as a key, an enforcing engine refused both deletes
+    # from the first billed upload on. A provenance label, not a joinable key.
+    ingestion_job_id: Mapped[Optional[int]] = mapped_column(nullable=True)
     agent: Mapped[Optional[str]] = mapped_column(nullable=True)
     model: Mapped[Optional[str]] = mapped_column(nullable=True)
     input_tokens: Mapped[int] = mapped_column(default=0)

@@ -1174,7 +1174,7 @@ ingestion job / ad-hoc search), the wording to keep consistent across
 |---|---|
 | Query time (query embedding, expansion LLM) | rides the existing `agent_completed.usage`; ordinary run rows attributed to the searching agent |
 | Ingestion (`_safe_record_ingestion_usage`) | **one** row per completed job — `agent="kb:ingest"`, `run_id=None`, `ingestion_job_id` set |
-| Test search (`_safe_record_search_usage`) | `agent="kb:search"`, **both** FKs NULL |
+| Test search (`_safe_record_search_usage`) | `agent="kb:search"`, **both** NULL |
 
 The query-time path drains `tool_ctx.usage` **on the failure path too** — the paid
 call already happened. Ingestion and search metering are best-effort in their own

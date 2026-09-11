@@ -343,6 +343,14 @@ exercises it under `make_test_engine()`, which enforces keys and, on the
 the survey during design: every path has one; the STATUS note was written
 before that coverage was confirmed.
 
+(Corrected 2026-09-11, the day after the cutover: the survey was true of
+the paths and still missed a case. No delete test ran with a `kb:ingest`
+usage row present, and `usage_records.ingestion_job_id` was a foreign key
+to the very job row both the prune and the KB delete remove. Under
+enforcement the prune failed on every upload after the second billed one
+and the KB delete was refused. Migration `c6d7e8f9g0h1` makes it a loose
+pointer, like `inbox_events.run_id`; see STATUS.)
+
 ### 4.5 Documents and decisions
 
 - `docs/deployment.md`: §1 "Database engine" (both engines supported; the

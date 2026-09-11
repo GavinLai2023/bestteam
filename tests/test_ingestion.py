@@ -1231,3 +1231,55 @@ def test_deleting_kb_ingestion_data_drops_its_generation_references(db, tmp_path
     db.commit()
 
     assert db.query(RunKnowledgeGeneration).count() == 0
+
+
+# --- Billed spend outlives the job it names ------------------------------------
+
+
+def test_pruning_a_billed_generation_keeps_its_usage_row(db, engine, tmp_path, monkeypatch):
+    """The prune deletes the job row; the `kb:ingest` usage row naming it stays,
+    id intact -- it is the org's cost history. Under an engine that enforces
+    keys (this one, and Postgres) a foreign key here made the prune fail
+    instead, on every upload after the second billed one, and
+    `run_ingestion_job` swallowed that as a warning -- so nothing was ever
+    pruned again (c6d7e8f9g0h1).
+    """
+    from ui.backend.db.models import UsageRecord
+
+    _stub_embeddings(monkeypatch)
+    model = "openai:text-embedding-3-small"
+    kb = _make_kb(db, name="vec_kb")
+    jobs = []
+    for i in range(1, ingestion._KEEP_COMPLETED_GENERATIONS + 2):
+        job = _make_job(db, kb, version=f"v_{i}")
+        # Distinct text each time: an unchanged document is carried forward
+        # and bills nothing, and the point is a billed row per generation.
+        version_dir = _version(tmp_path, f"v_{i}", {"a.txt": f"Policy text number {i}."})
+        assert _run(db, engine, job, kb, version_dir,
+                    kb_type="vector", embedding_model=model).status == "completed"
+        jobs.append(job.id)
+    oldest = jobs[0]
+
+    db.expire_all()
+    assert db.get(IngestionJob, oldest) is None, "the oldest generation was not pruned"
+    row = db.query(UsageRecord).filter_by(ingestion_job_id=oldest).one()
+    assert row.agent == "kb:ingest"
+
+
+def test_deleting_kb_ingestion_data_keeps_its_billed_usage_rows(db, engine, tmp_path, monkeypatch):
+    from ui.backend.db.models import UsageRecord
+
+    _stub_embeddings(monkeypatch)
+    kb = _make_kb(db, name="vec_kb")
+    job = _make_job(db, kb, version="v_1")
+    _run(db, engine, job, kb, _version(tmp_path, "v_1", {"a.txt": "Refunds within 30 days."}),
+         kb_type="vector", embedding_model="openai:text-embedding-3-small")
+    job_id = job.id
+    assert db.query(UsageRecord).filter_by(ingestion_job_id=job_id).count() == 1
+
+    ingestion.delete_kb_ingestion_data(db, kb.id)
+    db.commit()
+    db.expire_all()  # bulk deletes bypass the identity map
+
+    assert db.get(IngestionJob, job_id) is None
+    assert db.query(UsageRecord).filter_by(ingestion_job_id=job_id).count() == 1
