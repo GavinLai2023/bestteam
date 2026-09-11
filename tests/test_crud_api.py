@@ -1147,6 +1147,40 @@ def test_delete_kb_after_job_completes_leaves_no_orphan_rows(client):
     assert not upload_dir.exists()
 
 
+def test_delete_kb_with_billed_ingestion_spend_is_204(client):
+    # A vector KB's upload leaves one `kb:ingest` usage row naming the job.
+    # The row is the org's cost history and outlives the job by design, so
+    # the delete must not be refused on its account -- which is exactly what
+    # an engine enforcing keys did while `ingestion_job_id` was a foreign
+    # key (c6d7e8f9g0h1). Customer-visible: a 500 on the delete.
+    from ui.backend.db.models import UsageRecord
+
+    files = [("files", ("doc.txt", b"Refunds are allowed within 30 days.", "text/plain"))]
+    with _ingestion_futures() as futures:
+        resp = client.post("/api/config/knowledge_bases/billed_kb/upload?org=default", files=files)
+        assert resp.status_code == 200
+        _await_ingestion(futures.pop())
+    job_id = resp.json()["job_id"]
+
+    with open_test_db() as db:
+        kb = db.query(KnowledgeBaseRecord).filter_by(name="billed_kb").one()
+        # A `fake:` embedding spec bills nothing, so the row the live path
+        # writes for a real provider is inserted here in its exact shape.
+        db.add(UsageRecord(
+            run_id=None, ingestion_job_id=job_id, agent="kb:ingest",
+            model="openai:text-embedding-3-small", input_tokens=12, output_tokens=0,
+            org_id=kb.org_id,
+        ))
+        db.commit()
+
+    assert client.delete("/api/config/knowledge_bases/billed_kb?org=default").status_code == 204
+
+    with open_test_db() as db:
+        assert db.get(IngestionJob, job_id) is None
+        row = db.query(UsageRecord).filter_by(ingestion_job_id=job_id).one()
+        assert row.agent == "kb:ingest"
+
+
 _VALID_PIPELINE_CONFIG = {
     "knowledge_bases": [],
     "agents": [

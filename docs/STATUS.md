@@ -6,6 +6,37 @@
 
 ## Done
 
+- **`usage_records.ingestion_job_id` is a loose pointer now, not a foreign
+  key** (2026-09-11, migration `c6d7e8f9g0h1`). Found by re-reading an external
+  data-architecture assessment against the code the day the VPS moved to
+  Postgres, then proved with a probe under the key-enforcing test engine. One
+  `kb:ingest` usage row names the job that caused the embedding spend, and the
+  job row is deleted by design — `_prune_old_ingestion_versions` keeps two
+  generations, and deleting a knowledge base deletes every job it ran — while
+  the usage row must survive both: it is the org's cost history, and the
+  model's own comment already called it "a provenance label, not a joinable
+  key". SQLite never enforced the key, so the prune left a dangling id for
+  months and nothing noticed. Postgres enforces it, so from the first billed
+  upload on a vector/hybrid KB the prune failed on every later upload (caught,
+  logged with a traceback, the old generations' rows accumulating) and deleting
+  that KB was a 500. `local_folder` KBs write no usage row and were never
+  affected. The 09-10 "every delete path is tested under key enforcement"
+  survey was true and still missed it: no delete test had a billed usage row
+  present. Same treatment as `inbox_events.run_id` (`z3a4b5c6d7e8`): the
+  constraint is dropped on both engines and the downgrade nulls a pruned job's
+  pointer before re-adding it; three behaviour tests (the prune keeps the row,
+  `delete_kb_ingestion_data` keeps the row, the delete route is 204 with one
+  present) plus the migration round-trip. The rest of that assessment, item by
+  item, was either already done by another route (key enforcement in the test
+  engine + the Postgres lane + `check-orphans.sh`; Alembic-first on every
+  production path; the #127 generation guard) or is parked on an existing ADR
+  trigger: indexes on `runs`/`trace_events`/`usage_records` (none exist beyond
+  primary keys, Postgres does not index foreign-key columns on its own, about
+  200 non-chunk rows today — one migration when the first customer's data
+  starts), row-level security (ADR 3), shared state (ADR 2), RBAC (the
+  second-account trigger), Decimal pricing, and `notifications`/`feedback`
+  growing unbounded beside the already-known `inbox_events`, share
+  transcripts and memory.
 - **XML ingestion drops BPMN/DMN diagram geometry, and a parser change now
   invalidates carried-forward chunks** (2026-08-23). The `eb_and_awards`
   collection is seven exported process diagrams; **48% of what the renderer

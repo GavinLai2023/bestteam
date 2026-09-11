@@ -873,7 +873,10 @@ def test_usage_records_nullable_run_id_downgrade_deletes_only_rows_without_a_run
         columns = {c["name"]: c for c in inspector.get_columns("usage_records")}
         assert "ingestion_job_id" in columns
         assert columns["run_id"]["nullable"] is True
-        assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+        # A foreign key when n1o2p3q4r5s6 added it; c6d7e8f9g0h1 later in the
+        # chain makes it a loose pointer, and the round trip below passes
+        # through both.
+        assert not _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
 
         with engine.begin() as conn:
             conn.execute(sa.text(
@@ -910,7 +913,7 @@ def test_usage_records_nullable_run_id_downgrade_deletes_only_rows_without_a_run
         # downgrade deleted -- the spend is gone from the ledger for good.
         assert "ingestion_job_id" in columns
         assert columns["run_id"]["nullable"] is True
-        assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+        assert not _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
         assert ids == [1]
     finally:
         engine.dispose()
@@ -1376,3 +1379,44 @@ def test_a_preset_config_url_beats_the_environment(tmp_path, monkeypatch):
 
     assert target.exists()
     assert not elsewhere.exists()
+
+
+def test_loose_usage_ingestion_job_pointer_migration_drops_and_restores_the_key(tmp_path, monkeypatch):
+    """`usage_records.ingestion_job_id` names a job that generation pruning and
+    KB deletion delete by design, so at head it is no longer a foreign key
+    (c6d7e8f9g0h1).
+
+    As with z3a4b5c6d7e8, the downgrade is the half worth covering: re-adding
+    the key validates the rows already there, so the spend of a pruned job has
+    to lose its pointer first. Chain-built database -- the only shape where
+    the key ever existed to be dropped.
+    """
+    db_path = tmp_path / "loose_usage_pointer.db"
+    cfg = _alembic_config(db_path, monkeypatch)
+
+    command.upgrade(cfg, "head")
+    engine = make_engine(db_path)
+    try:
+        assert not _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+
+        # Exactly the state the upgrade makes legal: the spend of a job the
+        # prune has since deleted.
+        with engine.begin() as conn:
+            conn.execute(sa.text(
+                "INSERT INTO usage_records (run_id, ingestion_job_id, agent, model, "
+                "input_tokens, output_tokens, cost_estimate, org_id, created_at) "
+                "VALUES (NULL, 4242, 'kb:ingest', 'openai:text-embedding-3-small', "
+                "12, 0, NULL, NULL, CURRENT_TIMESTAMP)"
+            ))
+
+        command.downgrade(cfg, "b5c6d7e8f9g0")
+
+        with engine.connect() as conn:
+            assert conn.execute(sa.text("SELECT ingestion_job_id FROM usage_records")).scalar() is None
+            assert conn.execute(sa.text("PRAGMA foreign_key_check")).all() == []
+        assert _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+
+        command.upgrade(cfg, "head")
+        assert not _has_fk(engine, "usage_records", "ingestion_job_id", "knowledge_ingestion_jobs")
+    finally:
+        engine.dispose()
