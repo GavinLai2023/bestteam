@@ -358,22 +358,83 @@ every row whose foreign key points at nothing, and says which of them
 `--fix-orphans` would write as NULL and which it would drop. It calls the same
 `orphan_report()` the copy's pre-flight calls, so the two cannot disagree.
 
-**Phase 1 — deploy the release that ships `db`.** `./scripts/deploy.sh`. Its
-step 3 shows `POSTGRES_PASSWORD` as new in `.env.example`: add it to `.env`
-with a value from `openssl rand -hex 24` (hex only, so the same value pastes
-into the URL later) and leave `BESTTEAM_DATABASE_URL` empty. Step 5 creates
-the server, waits for its health check and recreates the backend, which
-stays on SQLite. Then:
+**Phase 1 — deploy the release that ships `db`.** `./scripts/deploy.sh`. Step 5
+creates the server, waits for its health check and recreates the backend,
+which stays on SQLite. Two things happen on the way there.
+
+**Its step 3 stops at a `Done -- continue? [y/N]` prompt**, having listed
+`POSTGRES_PASSWORD` as new in `.env.example`. The `.env` edit happens *at* that
+prompt, so make it from a second shell and leave the prompt waiting — answering
+`N` works too, but then the whole script has to run again. Generate the value
+straight into the file rather than through the screen and the scrollback:
+
+```bash
+sed -i '/^POSTGRES_PASSWORD=/d' .env                 # drop a half-finished line, if any
+printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+grep -c '^POSTGRES_PASSWORD=[0-9a-f]\{48\}$' .env    # 1: prefix right, 48 hex characters
+grep -n '^BESTTEAM_DATABASE_URL=' .env               # still empty -- phase 2 sets it
+```
+
+`printf`, not `echo`: a `.env` whose last line has no newline would otherwise
+take the variable onto the end of it. Hex only, so the same value pastes into
+the URL in phase 2 with nothing to escape — and it is read exactly once, when
+the `bestteam_pg` volume is initialised, so put it in the password manager now.
+Forgetting it is safe rather than silent: `${POSTGRES_PASSWORD:?...}` in the
+compose file makes compose refuse to parse, and `deploy.sh` stops at its step 4
+before anything is rebuilt.
+
+**This release adds a service to `docker-compose.yml`**, which is also the file
+a host most often edits locally (published ports behind a reverse proxy are the
+usual reason). `deploy.sh` stashes those edits around the pull and reapplies
+them; when its output says `Auto-merging docker-compose.yml`, check what came
+back before continuing — a clean result is your own hunks and nothing else:
+
+```bash
+git diff docker-compose.yml
+grep -n "postgres:16\|bestteam_pg\|POSTGRES_INITDB_ARGS\|service_healthy" docker-compose.yml
+```
+
+Then verify the three things phase 2 depends on:
 
 ```bash
 docker compose ps                                   # db: healthy; backend: healthy
 docker compose exec -T backend python -m ui.backend.admin check-env
 #   [OK] database: sqlite file /app/ui/backend/data/bestteam.db
-docker compose exec -T db psql -U bestteam -d bestteam -c "show lc_collate"    # C
+docker compose exec -T db psql -U bestteam -d bestteam -c \
+  "SELECT datcollate, datctype, pg_encoding_to_char(encoding) AS encoding
+     FROM pg_database WHERE datname = current_database()"
+#   C | C | UTF8
 ```
 
+The last one is the only check in this runbook that expires. `datcollate`
+decides what `ORDER BY name` returns and `datctype` what upper/lower do, both
+are fixed when the database is created, and `C` is what SQLite's byte order and
+the `backend-postgres` CI lane both use — the order-sensitive endpoints the
+suite verifies are verified against that. Anything else means
+`POSTGRES_INITDB_ARGS` did not take, and the fix is to delete the volume and
+let phase 1 run again (`docker compose down && docker volume rm
+bestteam_bestteam_pg`), which costs nothing today and is a restore after the
+cutover. Read it from `pg_database`, not `show lc_collate`: Postgres 16 removed
+that server variable, so on the version compose pins it answers
+`unrecognized configuration parameter`.
+
 **Phase 2 — the cutover.** Any quiet hour; on an idle deployment there is
-nothing to announce.
+nothing to announce. Three things to settle before you open the window:
+
+- **The `db` service has to be up** — phase 1 left it that way. The copy below
+  runs `--no-deps`, so compose starts nothing on its behalf; against a stopped
+  `db` it fails with a driver connection error rather than a line saying what
+  is missing.
+- **The host's `check-health` cron fails while the backend is stopped**, since
+  it `exec`s into that container. It writes to `/var/log/bestteam-health.log`
+  and, with `BESTTEAM_OPS_WEBHOOK_URL` set, pages. Pick an hour that misses the
+  entry, or comment it out for the window — an alarm you predicted still costs
+  you the trip to confirm it.
+- **`BESTTEAM_SECRETS_KEY` is in neither backup below.** Stored mailbox
+  passwords are encrypted with it, so a database backup restores everything
+  except email until the key is back too. It should already be in a password
+  manager; confirm that now rather than after a rollback — see "Backup and
+  restore" below.
 
 ```bash
 cd /opt/bestteam
@@ -460,7 +521,12 @@ docker compose exec -T backend python -m ui.backend.admin list-orgs        # aft
 ```
 
 `afterbackup` disappearing is the proof the restore replaced the database
-rather than reporting success over the old one. The next morning,
+rather than reporting success over the old one. It is also the warning about
+what else the drill undoes: the restore rolls the database back to the moment
+of the backup, so any operator action taken in between — a mailbox
+disconnected, an org created, a retention period set — is rolled back with it,
+silently and with a success message. Do the drill before those, or redo them
+after and check. The next morning,
 `ls /var/backups/bestteam/` holds `bestteam-<date>.pgdump` and
 `/var/log/bestteam-backup.log` ends with `Backed up postgresql database
 bestteam`.
@@ -472,6 +538,14 @@ wrote. After that a rollback would lose Postgres-side writes, so retire the
 file: one last copy through SQLite's backup API, then remove it and its
 siblings.
 
+Closing the window the same day is defensible on a deployment that is idle and
+holds no customer data — there is nothing for a rollback to lose yet, so the
+seven days buy nothing. What it costs is the shape of the way back: from here
+on it is a restore of the retired copy into a SQLite-configured deployment, and
+it loses everything written to Postgres since the cutover. That is zero on the
+day and grows with every run, so the retired file is a historical snapshot, not
+a switch.
+
 ```bash
 docker compose exec -T backend python -c "
 import sqlite3
@@ -480,8 +554,14 @@ dst = sqlite3.connect('/tmp/retired.db'); src.backup(dst); dst.close(); src.clos
 docker compose cp backend:/tmp/retired.db /var/backups/bestteam/retired-sqlite-$(date +%F).db
 docker compose exec -T backend rm -f /tmp/retired.db
 docker compose run --rm --no-deps --user root backend sh -c \
-  'cd /app/ui/backend/data && rm -f bestteam.db bestteam.db-wal bestteam.db-shm bestteam.db-journal'
+  'cd /app/ui/backend/data && rm -f bestteam.db bestteam.db-wal bestteam.db-shm bestteam.db-journal bestteam.db.lock'
 ```
+
+`bestteam.db.lock` goes with them: `lock_anchor_for` keys the single-instance
+lock to `<file>.lock` beside a SQLite file and to `<data_dir>/bestteam.lock`
+for a server database, so after the cutover the old anchor is a stray zero-byte
+file that reads, to the next person listing the directory, like a database that
+is still there.
 
 From then on the way back is an ordinary restore of a SQLite backup into a
 deployment configured for SQLite, not a flip.

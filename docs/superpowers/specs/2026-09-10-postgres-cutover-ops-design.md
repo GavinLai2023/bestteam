@@ -257,7 +257,9 @@ adds it (`openssl rand -hex 24`) and leaves `BESTTEAM_DATABASE_URL` empty.
 Verify: `docker compose ps` shows `db` healthy; `admin check-env` still
 reports `[OK] database: sqlite file /app/ui/backend/data/bestteam.db`;
 `docker compose exec -T db psql -U bestteam -d bestteam -c "show lc_collate"`
-prints `C`.
+prints `C`. (Corrected in the runbook on 2026-09-11, during the first walk
+through it: Postgres 16 removed that server variable, so the collation has to
+be read from `pg_database`. The check itself stands.)
 
 **Phase 2 — cutover** (any quiet hour; the system is idle, so no
 announcement):

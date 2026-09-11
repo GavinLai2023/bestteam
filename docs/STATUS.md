@@ -6,6 +6,35 @@
 
 ## Done
 
+- **The beta VPS runs on Postgres** (2026-09-11). All four phases of
+  `docs/deployment.md` §3 were walked on `app.bestteam.online` in one
+  sitting: the `db` service deployed alongside SQLite, `migrate-db` copied
+  16,166 rows across 31 tables (15,966 of them knowledge chunks) with counts
+  and primary keys verified, the backend recreated onto Postgres, the backup
+  and restore drill passed on a `.pgdump` (`afterbackup` gone afterwards),
+  and the SQLite file was retired the same day rather than after seven —
+  defensible on a deployment with no customer data, and the runbook now says
+  so and says what it costs. `check-env`, `/api/health`, `check-health` and
+  `check-orphans.sh` all report Postgres and no failures; the browser pass
+  (Activity history, a live run, knowledge-base retrieval) was done by hand.
+
+  **Walking it is what found the defects**, which is the point of walking it:
+  `show lc_collate` does not exist on the Postgres 16 the compose file pins
+  (the collation has to come from `pg_database`) — a command the runbook had
+  never actually run; `deploy.sh` stops at a `[y/N]` prompt where the `.env`
+  edit has to happen, which the runbook did not mention, so it now says to
+  use a second shell and gives a `printf ... >> .env` that keeps the password
+  off the screen; phase 1 edits the one file a host most often edits locally,
+  so it now says to check the `Auto-merging docker-compose.yml` result; the
+  restore drill rolls back any operator action taken between backup and
+  restore, which it now warns about; the retire step left `bestteam.db.lock`
+  behind, since the lock anchor moves to `bestteam.lock` on a server engine.
+  One code fix came out of it too: `check-env`'s new no-`provider:`-prefix
+  warning suggested `deepseek:<the operator's own value>`, right only for the
+  deployment it was written from — it now says to copy the catalog entry's
+  spec verbatim, because a guessed prefix goes unpriced exactly like a bare
+  name. Still open: off-site backups, Postgres tuning/PITR, a Chinese runbook.
+
 - **XML ingestion drops BPMN/DMN diagram geometry, and a parser change now
   invalidates carried-forward chunks** (2026-08-23). The `eb_and_awards`
   collection is seven exported process diagrams; **48% of what the renderer
